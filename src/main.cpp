@@ -44,8 +44,9 @@ void usage() {
       "  llm_infer generate --model DIR --prompt TEXT [--backend cpu|cuda]\n"
       "                     [--precision fp32|int8] [--max-new-tokens 128]\n"
       "                     [--max-seq-len 2048] [--system TEXT] [--raw] [--cublas]\n"
-      "  llm_infer benchmark --model DIR --prompt TEXT [--warmup 5] [--repeat 20]\n"
-      "                      [--json FILE] [other generation options]\n"
+      "  llm_infer benchmark --model DIR (--prompt TEXT | --token-ids CSV)\n"
+      "                      [--warmup 5] [--repeat 20] [--json FILE]\n"
+      "                      [--telemetry-markers] [other generation options]\n"
       "  llm_infer inspect --model DIR [--precision fp32|int8] [--max-seq-len 2048]\n"
       "  llm_infer tokenize --model DIR --text TEXT [--chat]\n"
       "  llm_infer logits --model DIR (--prompt TEXT | --token-ids CSV) --output FILE\n";
@@ -98,6 +99,27 @@ double percentile(std::vector<double> values, double p) {
   std::sort(values.begin(), values.end());
   const size_t index = static_cast<size_t>(std::ceil(p * values.size())) - 1;
   return values[std::min(index, values.size() - 1)];
+}
+
+nlohmann::json summarize(const std::vector<double>& values) {
+  INFER_CHECK(!values.empty(), "cannot summarize empty samples");
+  const double mean = std::accumulate(values.begin(), values.end(), 0.0) / values.size();
+  double variance = 0.0;
+  for (const double value : values) {
+    const double delta = value - mean;
+    variance += delta * delta;
+  }
+  variance /= values.size();
+  const double stddev = std::sqrt(variance);
+  return {
+      {"mean", mean},
+      {"p50", percentile(values, 0.50)},
+      {"p95", percentile(values, 0.95)},
+      {"min", *std::min_element(values.begin(), values.end())},
+      {"max", *std::max_element(values.begin(), values.end())},
+      {"stddev", stddev},
+      {"cv_percent", mean != 0.0 ? stddev * 100.0 / std::abs(mean) : 0.0},
+  };
 }
 
 long peak_rss_kib() {
@@ -203,36 +225,78 @@ void benchmark(const Arguments& args) {
   const std::filesystem::path directory = args.get("--model");
   if (directory.empty()) throw infer::Error("--model is required");
   infer::QwenTokenizer tokenizer(directory / "tokenizer.json");
-  const auto prompt = make_prompt(args, tokenizer);
+  const auto token_ids = args.get("--token-ids");
+  if (!token_ids.empty() && args.has("--prompt")) {
+    throw infer::Error("--prompt and --token-ids are mutually exclusive");
+  }
+  const auto prompt = token_ids.empty() ? make_prompt(args, tokenizer)
+                                        : parse_token_ids(token_ids);
   const auto options = runtime_options(args);
   infer::Qwen2Model model(directory, options);
   const int new_tokens = args.get_int("--max-new-tokens", 128);
   const int warmup = args.get_int("--warmup", 5);
   const int repeat = args.get_int("--repeat", 20);
-  if (warmup < 0 || repeat <= 0) throw infer::Error("warmup must be >= 0 and repeat must be > 0");
+  if (warmup < 0 || repeat <= 0 || new_tokens <= 0) {
+    throw infer::Error("warmup must be >= 0, repeat and max-new-tokens must be > 0");
+  }
   for (int i = 0; i < warmup; ++i) model.generate(prompt, new_tokens, false);
+
+  if (args.has("--telemetry-markers")) {
+    std::cerr << "BENCHMARK_MEASURE_BEGIN\n" << std::flush;
+  }
+  infer::WallTimer measurement;
   std::vector<double> totals;
   std::vector<double> ttfts;
+  std::vector<double> decode_times;
+  std::vector<double> tpots;
   std::vector<double> throughputs;
-  std::vector<int> generated_counts;
+  std::vector<double> prefill_throughputs;
+  nlohmann::json samples = nlohmann::json::array();
   for (int i = 0; i < repeat; ++i) {
     const auto result = model.generate(prompt, new_tokens, false);
+    INFER_CHECK(result.stats.generated_tokens == new_tokens,
+                "benchmark must generate exactly max-new-tokens");
+    const double tpot = result.stats.generated_tokens > 1
+                            ? result.stats.decode_ms / (result.stats.generated_tokens - 1)
+                            : 0.0;
+    const double prefill_throughput = result.stats.ttft_ms > 0.0
+                                          ? prompt.size() * 1000.0 / result.stats.ttft_ms
+                                          : 0.0;
     totals.push_back(result.stats.total_ms);
     ttfts.push_back(result.stats.ttft_ms);
+    decode_times.push_back(result.stats.decode_ms);
+    tpots.push_back(tpot);
     throughputs.push_back(result.stats.decode_tokens_per_second());
-    generated_counts.push_back(result.stats.generated_tokens);
+    prefill_throughputs.push_back(prefill_throughput);
+    samples.push_back({
+        {"iteration", i},
+        {"ttft_ms", result.stats.ttft_ms},
+        {"decode_ms", result.stats.decode_ms},
+        {"total_ms", result.stats.total_ms},
+        {"tpot_ms", tpot},
+        {"prefill_tokens_per_second", prefill_throughput},
+        {"decode_tokens_per_second", result.stats.decode_tokens_per_second()},
+        {"generated_tokens", result.stats.generated_tokens},
+    });
   }
-  const double mean_total = std::accumulate(totals.begin(), totals.end(), 0.0) / totals.size();
-  const double mean_ttft = std::accumulate(ttfts.begin(), ttfts.end(), 0.0) / ttfts.size();
-  const double mean_throughput =
-      std::accumulate(throughputs.begin(), throughputs.end(), 0.0) / throughputs.size();
+  const double measurement_ms = measurement.elapsed_ms();
+  if (args.has("--telemetry-markers")) {
+    std::cerr << "BENCHMARK_MEASURE_END\n" << std::flush;
+  }
   const long peak_rss = peak_rss_kib();
   const size_t peak_rss_bytes =
       peak_rss > 0 ? static_cast<size_t>(peak_rss) * 1024ULL : 0;
   nlohmann::json report{
+      {"schema_version", 2},
       {"configuration",
        {{"backend", infer::to_string(options.backend)},
         {"precision", infer::to_string(options.precision)},
+        {"batch_size", 1},
+        {"decoding", "greedy_argmax"},
+        {"early_stop", false},
+        {"prefill_mode", "serial_legacy"},
+        {"max_sequence_length", options.max_sequence_length},
+        {"use_cublas_gemv", options.use_cublas_gemv},
         {"warmup", warmup},
         {"repeat", repeat},
         {"threading",
@@ -241,13 +305,17 @@ void benchmark(const Arguments& args) {
       {"tokens",
        {{"prompt", prompt.size()},
         {"max_new", new_tokens},
-        {"generated", generated_counts.empty() ? 0 : generated_counts.front()}}},
-      {"latency_ms",
-       {{"ttft_mean", mean_ttft},
-        {"total_mean", mean_total},
-        {"total_p50", percentile(totals, 0.50)},
-        {"total_p95", percentile(totals, 0.95)}}},
-      {"throughput_tokens_per_second", {{"decode_mean", mean_throughput}}},
+        {"generated_per_iteration", new_tokens},
+        {"prompt_ids", prompt}}},
+      {"measurement", {{"wall_time_ms", measurement_ms}}},
+      {"statistics",
+       {{"ttft_ms", summarize(ttfts)},
+        {"decode_ms", summarize(decode_times)},
+        {"total_ms", summarize(totals)},
+        {"tpot_ms", summarize(tpots)},
+        {"prefill_tokens_per_second", summarize(prefill_throughputs)},
+        {"decode_tokens_per_second", summarize(throughputs)}}},
+      {"samples", samples},
       {"memory",
        {{"peak_rss", memory_size(peak_rss_bytes)},
         {"model_archive", memory_size(model.archive().mapped_bytes())},
@@ -261,6 +329,7 @@ void benchmark(const Arguments& args) {
     if (!parent.empty()) std::filesystem::create_directories(parent);
     std::ofstream output(json_path);
     output << report.dump(2) << '\n';
+    INFER_CHECK(output.good(), "failed to write benchmark JSON");
   }
 }
 

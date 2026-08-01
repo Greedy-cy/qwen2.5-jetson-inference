@@ -66,4 +66,8 @@ if(INFER_BUILD_TESTS)
   target_link_libraries(infer_tests PRIVATE infer_core GTest::gtest_main)
   include(GoogleTest)
   gtest_discover_tests(infer_tests)
+
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME BenchmarkRunner.SchemaSmoke
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/run_benchmark.py --self-test)
 endif()
