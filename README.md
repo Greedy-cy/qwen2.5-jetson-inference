@@ -118,6 +118,10 @@ scale tensor、量化轴和 group size。C++ 使用只读 `mmap`，CUDA 初始�
 22.82 tok/s，INT8 为 32.97 tok/s（+44.44%）；模型文件缩小 53.16%。完整口径、
 正确性误差和内存数据见 [`docs/07-jetson-results.md`](docs/07-jetson-results.md)。
 
+同一 5/20 协议下，CPU FP32 矩阵化 Prefill 将 32-token TTFT 从 2300.36 ms 降至
+355.46 ms（`6.47x`），32+128 总延迟降低 16.43%。完整 A/B、能耗和 workspace
+代价见 [`CODEX-CP06`](docs/codex-cp06-cpu-fp32-batched-prefill.md)。
+
 可重复执行完整数值对照：
 
 ```bash

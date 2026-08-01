@@ -82,23 +82,43 @@ Release 构建后的 17 个测试全部通过：
 - logits 最大绝对误差：`2.4318695e-5`。
 - 5-token prompt 后继续 greedy Decode 16 token：两条路径的 16 个 token 完全一致。
 
-## 非正式性能冒烟
+## 正式性能 A/B
 
-以下数据只用于确认 GEMM 路径没有性能倒退，不能替代 Checkpoint 8 的正式 5/20
-benchmark：
+这里的 serial 指旧框架的 prompt 路径：32 个 prompt token 逐个执行完整
+`forward_token()`，包括 32 次 LM Head。batched 指新的矩阵化 Prefill：按层对 32 行
+hidden 执行 GEMM，只对最后一行执行一次 LM Head。
 
-- canonical 32-token prompt、2-token output。
-- CPU 0-5、OpenBLAS/OMP 6 线程。
-- `max-seq-len=64`、warmup=0、repeat=1。
-- 未执行正式锁频、温度稳定和 CV 检查。
+两条路径在同一 commit、同一模型和同一设备上使用以下协议：
 
-| 模式 | TTFT | Prefill tok/s | 总 workspace |
+- canonical 32-token prompt、128-token output。
+- `max-seq-len=256`、5 次 warmup、20 次正式测量。
+- CPU 0-5，OpenBLAS/OMP 固定 6 线程。
+- MAXN_SUPER，runner 临时锁频并在退出时恢复；测试后 governor 为 `schedutil`。
+- Decode 统计后续 127 次 `decode_next()`，不把 TTFT 混入 Decode tok/s。
+
+| 指标 | 旧 serial | 新 batched | 变化 |
 |---|---:|---:|---:|
-| serial | 2449.53 ms | 13.06 | 0.65 MiB |
-| batched | 405.89 ms | 78.84 | 5.37 MiB |
+| TTFT mean | 2300.36 ms | 355.46 ms | `6.47x`，降低 84.55% |
+| Prefill tok/s mean | 13.91 | 90.02 | `6.47x` |
+| Decode tok/s mean | 13.483 | 13.456 | -0.20% |
+| 32+128 总延迟 mean | 11719.80 ms | 9793.72 ms | `1.197x`，降低 16.43% |
+| 能耗/generated token | 1.205 J | 1.008 J | 降低 16.39% |
+| mean VDD_IN | 13.166 W | 13.170 W | +0.03% |
+| 总 workspace | 0.65 MiB | 19.53 MiB | +18.875 MiB |
+| peak RSS | 2054.97 MiB | 2070.84 MiB | +15.87 MiB |
 
-单次冒烟中 TTFT 加速为 `6.03x`，额外 workspace 为 `4.72 MiB`。这些数字不得写入
-最终简历或正式性能表；正式收益将在 Checkpoint 8 按 prompt sweep 和 5/20 协议测量。
+serial/batched 的 TTFT CV 分别为 `0.154%` 和 `0.388%`；Decode CV 分别为
+`0.104%` 和 `0.056%`，均明显低于 3% 门槛。Decode 吞吐只变化 -0.20%，证明本次
+端到端收益来自 Prefill，而不是 Decode 路径变化。
+
+TTFT 提升 6.47 倍不等于完整 32+128 生成提升 6.47 倍：长输出仍由 127 次串行 Decode
+主导，因此总延迟改善为 16.43%。prompt 越长、输出越短，Prefill 优化对请求总延迟的
+占比越高。
+
+审核摘要位于
+`benchmarks/results/codex-cp06-cpu-fp32-prefill-ab-summary.json`，原始结果位于忽略的
+`results/codex-cp06-cpu-fp32-{serial,batched}-5x20.json`。Checkpoint 8 仍会补充
+`1/32/128/512` prompt sweep。
 
 ## 下一步边界
 
