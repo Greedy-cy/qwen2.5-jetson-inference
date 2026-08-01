@@ -104,6 +104,85 @@ void attention_decode(const float* q, const float* key_cache, const float* value
   }
 }
 
+void embedding_batch(const float* embedding, const int* tokens, float* output,
+                     int token_count, int hidden_size) {
+  for (int token_index = 0; token_index < token_count; ++token_index) {
+    const float* source =
+        embedding + static_cast<size_t>(tokens[token_index]) * hidden_size;
+    std::copy(source, source + hidden_size,
+              output + static_cast<size_t>(token_index) * hidden_size);
+  }
+}
+
+void rms_norm_batch(const float* input, const float* weight, float* output,
+                    int token_count, int hidden_size, float epsilon) {
+  for (int token = 0; token < token_count; ++token) {
+    rms_norm(input + static_cast<size_t>(token) * hidden_size, weight,
+             output + static_cast<size_t>(token) * hidden_size,
+             hidden_size, epsilon);
+  }
+}
+
+void linear_fp32_batch(const float* weight, const float* bias, const float* input,
+                       float* output, int token_count, int out_features,
+                       int in_features) {
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+              token_count, out_features, in_features, 1.0f,
+              input, in_features, weight, in_features, 0.0f,
+              output, out_features);
+  if (bias) {
+    for (int token = 0; token < token_count; ++token) {
+      float* row = output + static_cast<size_t>(token) * out_features;
+      for (int feature = 0; feature < out_features; ++feature) {
+        row[feature] += bias[feature];
+      }
+    }
+  }
+}
+
+void rope_batch(float* q, float* k, int token_count, int num_heads,
+                int num_kv_heads, int head_dim, int start_position, float theta) {
+  const int q_stride = num_heads * head_dim;
+  const int k_stride = num_kv_heads * head_dim;
+  for (int token = 0; token < token_count; ++token) {
+    rope(q + static_cast<size_t>(token) * q_stride,
+         k + static_cast<size_t>(token) * k_stride,
+         num_heads, num_kv_heads, head_dim, start_position + token, theta);
+  }
+}
+
+void store_kv_batch(const float* k, const float* v, float* key_cache,
+                    float* value_cache, int token_count, int num_kv_heads,
+                    int head_dim, int max_sequence_length) {
+  const int kv_stride = num_kv_heads * head_dim;
+  for (int token = 0; token < token_count; ++token) {
+    for (int head = 0; head < num_kv_heads; ++head) {
+      const size_t source_offset =
+          static_cast<size_t>(token) * kv_stride + head * head_dim;
+      const size_t cache_offset =
+          (static_cast<size_t>(head) * max_sequence_length + token) * head_dim;
+      std::copy(k + source_offset, k + source_offset + head_dim,
+                key_cache + cache_offset);
+      std::copy(v + source_offset, v + source_offset + head_dim,
+                value_cache + cache_offset);
+    }
+  }
+}
+
+void attention_prefill(const float* q, const float* key_cache,
+                       const float* value_cache, float* output, int token_count,
+                       int num_heads, int num_kv_heads, int head_dim,
+                       int max_sequence_length, float* score_scratch) {
+  const int hidden_size = num_heads * head_dim;
+  for (int token = 0; token < token_count; ++token) {
+    attention_decode(q + static_cast<size_t>(token) * hidden_size,
+                     key_cache, value_cache,
+                     output + static_cast<size_t>(token) * hidden_size,
+                     num_heads, num_kv_heads, head_dim, token + 1,
+                     max_sequence_length, score_scratch);
+  }
+}
+
 void silu_mul(const float* gate, const float* up, float* output, int n) {
   for (int i = 0; i < n; ++i) {
     const float silu = gate[i] / (1.0f + std::exp(-gate[i]));

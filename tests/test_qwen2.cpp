@@ -58,7 +58,7 @@ class TinyQwen2Model {
         {"num_attention_heads", 1},
         {"num_key_value_heads", 1},
         {"vocab_size", 8},
-        {"max_position_embeddings", 32},
+        {"max_position_embeddings", 528},
         {"bos_token_id", 0},
         {"eos_token_id", 7},
         {"rms_norm_eps", 1e-5},
@@ -155,6 +155,29 @@ void expect_logits_equal(const infer::Qwen2Model& lhs, const infer::Qwen2Model& 
   for (size_t i = 0; i < a.size(); ++i) EXPECT_FLOAT_EQ(a[i], b[i]);
 }
 
+double logits_cosine(const infer::Qwen2Model& lhs, const infer::Qwen2Model& rhs) {
+  const auto a = lhs.last_logits_host();
+  const auto b = rhs.last_logits_host();
+  if (a.size() != b.size()) return 0.0;
+  double dot = 0.0;
+  double norm_a = 0.0;
+  double norm_b = 0.0;
+  for (size_t i = 0; i < a.size(); ++i) {
+    dot += static_cast<double>(a[i]) * b[i];
+    norm_a += static_cast<double>(a[i]) * a[i];
+    norm_b += static_cast<double>(b[i]) * b[i];
+  }
+  return dot / std::sqrt(norm_a * norm_b);
+}
+
+std::vector<int> prompt_tokens(size_t length) {
+  std::vector<int> prompt(length);
+  for (size_t i = 0; i < length; ++i) {
+    prompt[i] = static_cast<int>((i * 5 + 1) % 8);
+  }
+  return prompt;
+}
+
 }  // namespace
 
 TEST(PrefillMode, ParseAndFormat) {
@@ -226,7 +249,7 @@ TEST(Qwen2State, GenerateResetsStateAndSupportsSingleTokenPrompt) {
   infer::Qwen2Model model(tiny.path(), options);
 
   EXPECT_EQ(model.effective_prefill_mode(1), infer::PrefillMode::kSerial);
-  EXPECT_EQ(model.effective_prefill_mode(2), infer::PrefillMode::kSerial);
+  EXPECT_EQ(model.effective_prefill_mode(2), infer::PrefillMode::kBatched);
   const auto first = model.generate({1, 2}, 5, false);
   EXPECT_EQ(model.position(), 6);
   const auto second = model.generate({1, 2}, 5, false);
@@ -240,14 +263,82 @@ TEST(Qwen2State, GenerateResetsStateAndSupportsSingleTokenPrompt) {
   EXPECT_THROW(model.generate(std::vector<int>(9, 1), 1, false), infer::Error);
 }
 
-TEST(Qwen2State, BatchedModeFailsExplicitlyWithoutMutatingState) {
+TEST(Qwen2State, BatchedModeRunsAndAdvancesState) {
   TinyQwen2Model tiny;
   auto options = cpu_options();
   options.prefill_mode = infer::PrefillMode::kBatched;
   infer::Qwen2Model model(tiny.path(), options);
 
   EXPECT_EQ(model.effective_prefill_mode(2), infer::PrefillMode::kBatched);
-  EXPECT_THROW(model.prefill({1, 2}), infer::Error);
-  EXPECT_EQ(model.position(), 0);
-  EXPECT_FALSE(model.has_prefilled());
+  EXPECT_GT(model.prefill_workspace_bytes(), 0u);
+  const int next = model.prefill({1, 2});
+  EXPECT_GE(next, 0);
+  EXPECT_LT(next, model.config().vocab_size);
+  EXPECT_EQ(model.position(), 2);
+  EXPECT_TRUE(model.has_prefilled());
+  EXPECT_THROW(model.prefill({1}), infer::Error);
+}
+
+TEST(Qwen2BatchedPrefill, MatchesSerialAcrossRequiredLengths) {
+  TinyQwen2Model tiny;
+  constexpr std::array<int, 7> kLengths{1, 2, 31, 32, 127, 128, 512};
+  for (const int length : kLengths) {
+    SCOPED_TRACE("prompt_length=" + std::to_string(length));
+    auto serial_options = cpu_options(512);
+    auto batched_options = cpu_options(512);
+    batched_options.prefill_mode = infer::PrefillMode::kBatched;
+    infer::Qwen2Model serial(tiny.path(), serial_options);
+    infer::Qwen2Model batched(tiny.path(), batched_options);
+    const auto prompt = prompt_tokens(static_cast<size_t>(length));
+
+    const int serial_next = serial.prefill(prompt);
+    const int batched_next = batched.prefill(prompt);
+    EXPECT_EQ(batched_next, serial_next);
+    EXPECT_GE(logits_cosine(serial, batched), 0.999999);
+    EXPECT_EQ(serial.position(), length);
+    EXPECT_EQ(batched.position(), length);
+    EXPECT_EQ(serial.prefill_workspace_bytes(), 0u);
+    EXPECT_GT(batched.prefill_workspace_bytes(), 0u);
+  }
+}
+
+TEST(Qwen2BatchedPrefill, DecodeStateMatchesSerialFor16Tokens) {
+  TinyQwen2Model tiny;
+  auto serial_options = cpu_options(32);
+  auto batched_options = cpu_options(32);
+  batched_options.prefill_mode = infer::PrefillMode::kBatched;
+  infer::Qwen2Model serial(tiny.path(), serial_options);
+  infer::Qwen2Model batched(tiny.path(), batched_options);
+  const auto prompt = prompt_tokens(8);
+
+  int token = serial.prefill(prompt);
+  ASSERT_EQ(batched.prefill(prompt), token);
+  EXPECT_GE(logits_cosine(serial, batched), 0.999999);
+  for (int step = 0; step < 16; ++step) {
+    SCOPED_TRACE("decode_step=" + std::to_string(step));
+    const int serial_next = serial.decode_next(token);
+    const int batched_next = batched.decode_next(token);
+    ASSERT_EQ(batched_next, serial_next);
+    EXPECT_GE(logits_cosine(serial, batched), 0.999999);
+    token = serial_next;
+  }
+  EXPECT_EQ(serial.position(), 24);
+  EXPECT_EQ(batched.position(), 24);
+}
+
+TEST(Qwen2BatchedPrefill, CudaAutoStaysSerialAndExplicitBatchedFails) {
+  TinyQwen2Model tiny;
+  auto auto_options = cpu_options(8);
+  auto_options.backend = infer::Device::kCuda;
+  auto_options.prefill_mode = infer::PrefillMode::kAuto;
+  infer::Qwen2Model automatic(tiny.path(), auto_options);
+  EXPECT_EQ(automatic.effective_prefill_mode(2), infer::PrefillMode::kSerial);
+  EXPECT_EQ(automatic.prefill_workspace_bytes(), 0u);
+
+  auto batched_options = auto_options;
+  batched_options.prefill_mode = infer::PrefillMode::kBatched;
+  infer::Qwen2Model batched(tiny.path(), batched_options);
+  EXPECT_THROW(batched.prefill({1, 2}), infer::Error);
+  EXPECT_EQ(batched.position(), 0);
+  EXPECT_FALSE(batched.has_prefilled());
 }

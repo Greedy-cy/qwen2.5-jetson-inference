@@ -82,10 +82,11 @@ flowchart LR
 ```
 
 每个 decoder layer 执行 `RMSNorm → Q/K/V → RoPE → GQA → O projection → residual
-→ RMSNorm → SwiGLU MLP → residual`。prefill 与 decode 共用完全相同的数学路径；当前
-prefill 以 token 为单位执行，便于逐层核对，后续性能版本会增加矩阵化 prefill。
-独立 `prefill()/decode_next()` 状态机及当前模式语义见
-[`CODEX-CP05`](docs/codex-cp05-prefill-decode-state-machine.md)。
+→ RMSNorm → SwiGLU MLP → residual`。CPU FP32 Prefill 使用 `[tokens, hidden]`
+布局，Linear 由 OpenBLAS GEMM 批量计算，causal attention 不保存完整 attention matrix。
+`auto` 在 CPU FP32 且 prompt 长度不少于 2 时选择 batched，其余现有路径仍选择 serial。
+状态机拆分见 [`CODEX-CP05`](docs/codex-cp05-prefill-decode-state-machine.md)，CPU
+矩阵化实现见 [`CODEX-CP06`](docs/codex-cp06-cpu-fp32-batched-prefill.md)。
 
 ## 模型文件
 
@@ -106,7 +107,7 @@ scale tensor、量化轴和 group size。C++ 使用只读 `mmap`，CUDA 初始�
 
 - 只支持 Qwen2 架构、batch=1 和 greedy decoding。
 - 当前 CUDA attention 是易读的 decode kernel，不是 FlashAttention。
-- prefill 暂未矩阵化；长 prompt 的 TTFT 不是当前优化目标。
+- CUDA FP32/W8A32 Prefill 仍为 serial；CPU FP32 已支持 serial/batched。
 - Jetson 为统一内存设备，峰值内存需结合 RSS 与 `tegrastats`，不能使用桌面卡的
   `nvidia-smi --query-compute-apps` 口径。
 - 绝对性能数字必须附带 commit、模型、功耗模式、CUDA 版本和完整 benchmark JSON。

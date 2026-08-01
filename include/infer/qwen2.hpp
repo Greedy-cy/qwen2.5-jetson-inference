@@ -54,7 +54,8 @@ class Qwen2Model {
   PrefillMode effective_prefill_mode(size_t prompt_tokens) const;
   int position() const { return position_; }
   bool has_prefilled() const { return has_prefilled_; }
-  size_t workspace_bytes() const { return workspace_.bytes(); }
+  size_t workspace_bytes() const { return workspace_.bytes() + prefill_workspace_.bytes(); }
+  size_t prefill_workspace_bytes() const { return prefill_workspace_.bytes(); }
   size_t kv_cache_bytes() const { return kv_cache_.bytes(); }
   size_t device_weight_bytes() const { return device_weights_.bytes(); }
 
@@ -64,12 +65,17 @@ class Qwen2Model {
   void linear(std::string_view weight_name, std::string_view bias_name,
               const float* input, float* output, int out_features,
               int in_features, bool prefer_cublas = false);
+  void linear_cpu_fp32_batch(std::string_view weight_name,
+                             std::string_view bias_name, const float* input,
+                             float* output, int token_count, int out_features,
+                             int in_features);
   const void* weight(std::string_view name) const;
   const float* float_weight(std::string_view name) const;
   const float* optional_float_weight(std::string_view name) const;
   float* layer_key_cache(int layer);
   float* layer_value_cache(int layer);
   int forward_cpu(int token, int position);
+  int prefill_cpu_fp32(const std::vector<int>& prompt_tokens);
   int forward_cuda(int token, int position);
   void synchronize() const;
 
@@ -79,6 +85,7 @@ class Qwen2Model {
   std::unordered_map<std::string, const void*> weights_;
   Buffer device_weights_;
   Buffer workspace_;
+  Buffer prefill_workspace_;
   Buffer kv_cache_;
   Buffer argmax_buffer_;
   std::unique_ptr<cuda::Context> cuda_context_;
@@ -95,6 +102,16 @@ class Qwen2Model {
   float* mlp_{nullptr};
   float* logits_{nullptr};
   float* attention_scores_{nullptr};
+  float* prefill_x_{nullptr};
+  float* prefill_norm_{nullptr};
+  float* prefill_q_{nullptr};
+  float* prefill_k_{nullptr};
+  float* prefill_v_{nullptr};
+  float* prefill_attention_{nullptr};
+  float* prefill_hidden_tmp_{nullptr};
+  float* prefill_gate_{nullptr};
+  float* prefill_up_{nullptr};
+  float* prefill_mlp_{nullptr};
   int position_{0};
   bool has_prefilled_{false};
 };
