@@ -1,0 +1,76 @@
+{
+  "schema_version": "1.0",
+  "artifact_type": "audited_correctness_summary",
+  "checkpoint": 12,
+  "name": "end_to_end_cuda_w16a16_bfloat16",
+  "implementation_commit": "c5dd91eafff51cd33084e4b0d04e86ec3447add5",
+  "model": {
+    "name": "Qwen2.5-0.5B-Instruct",
+    "native_weight_dtype": "bfloat16",
+    "archive_sha256": "f8b6b16a3a85d70083bfd7f822a7d587332982b0f0e27691512efa844855b2a6"
+  },
+  "runtime": {
+    "backend": "cuda",
+    "precision": "w16a16",
+    "w16_dtype": "bfloat16",
+    "a16_dtype": "bfloat16",
+    "kv_cache_dtype": "bfloat16",
+    "logits_dtype": "bfloat16",
+    "sensitive_reductions": "float32",
+    "prefill": "matrixized",
+    "default_linear_kernel": "cublas"
+  },
+  "tests": {
+    "full_passed": 25,
+    "full_failed": 0,
+    "bf16_end_to_end_tests": [
+      "Qwen2BFloat16.PrefillMatchesFp32AcrossFixedPrompts",
+      "Qwen2BFloat16.PrefillKvStateContinuesDecodeFor16Tokens",
+      "Qwen2BFloat16.CustomMatchesCublasAndUsesBf16Storage"
+    ]
+  },
+  "real_model_logits": {
+    "prompt_source": "canonical_32_token_prefixes",
+    "acceptance_cosine_floor": 0.98,
+    "all_top1_match": true,
+    "results": [
+      {"prompt_tokens": 1, "fp32_top1": 72030, "w16a16_top1": 72030, "cosine": 0.9820757154818921},
+      {"prompt_tokens": 2, "fp32_top1": 198, "w16a16_top1": 198, "cosine": 0.9990092160532306},
+      {"prompt_tokens": 8, "fp32_top1": 382, "w16a16_top1": 382, "cosine": 0.9994420256204112},
+      {"prompt_tokens": 16, "fp32_top1": 279, "w16a16_top1": 279, "cosine": 0.9999074569675049},
+      {"prompt_tokens": 32, "fp32_top1": 80285, "w16a16_top1": 80285, "cosine": 0.9998949231089933}
+    ]
+  },
+  "canonical_generation": {
+    "tokens": 16,
+    "w16_custom_equals_w16_cublas": true,
+    "w16_equals_fp32": false,
+    "matching_prefix_tokens": 6,
+    "first_divergence_index_zero_based": 6,
+    "fp32_token": 4903,
+    "w16a16_token": 11434,
+    "fp32_top2_margin": 0.04976654052734375,
+    "divergence_interpretation": "near-tie ranking flip after native BF16 activation rounding"
+  },
+  "memory_max_sequence_32": {
+    "w16a16_archive_bytes": 989114112,
+    "w16a16_device_weights_bytes": 988065536,
+    "w16a16_workspace_bytes": 1579904,
+    "w16a16_kv_cache_bytes": 393216,
+    "fp32_device_weights_reference_bytes": 1976131072,
+    "device_weight_ratio_w16a16_over_fp32": 0.5
+  },
+  "acceptance_policy": {
+    "fp32_role": "numeric comparison path, not native-weight oracle",
+    "reason": "official source weights are BF16",
+    "requirements": [
+      "top1_match_5_of_5",
+      "finite_logits",
+      "cosine_at_least_0.98",
+      "prefill_kv_decode_continuity",
+      "w16_custom_cublas_greedy_consistency",
+      "document_near_tie_fp32_divergence"
+    ]
+  },
+  "performance_measurement": null
+}
