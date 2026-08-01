@@ -1,0 +1,231 @@
+{
+  "schema_version": "1.0",
+  "artifact_type": "audited_microbenchmark_summary",
+  "checkpoint": 11,
+  "name": "cuda_bf16_linear_custom_vs_cublas",
+  "implementation_commit": "61a03a5a836d0ee52e1abdc9bb69a44b1d94020d",
+  "model_archive": {
+    "path": "models/qwen2.5-0.5b-instruct/model.w16a16.qbin",
+    "sha256": "f8b6b16a3a85d70083bfd7f822a7d587332982b0f0e27691512efa844855b2a6"
+  },
+  "environment": {
+    "device": "Jetson Orin Nano Super 8GB",
+    "power_mode": "MAXN_SUPER",
+    "jetson_clocks": "locked_during_measurement_and_restored",
+    "build_type": "Release",
+    "cuda": "12.6"
+  },
+  "protocol": {
+    "timer": "CUDA Event",
+    "warmup": 5,
+    "repeat": 20,
+    "prefill_tokens": 32,
+    "statistic": "p50"
+  },
+  "cases": [
+    {
+      "name": "q_proj",
+      "out_features": 896,
+      "in_features": 896,
+      "bias": true,
+      "gemv": {
+        "custom_p50_ms": 0.052191998809576035,
+        "cublas_p50_ms": 0.036479998379945755,
+        "custom_over_cublas": 1.4307017852903108,
+        "max_custom_vs_cublas_relative_to_peak": 0.0007911392405063291,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 1.4600120013273215e-05,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 1.4600120013273215e-05
+      },
+      "gemm": {
+        "tokens": 32,
+        "custom_p50_ms": 1.0870720148086548,
+        "cublas_p50_ms": 0.03379200026392937,
+        "custom_over_cublas": 32.16950776273014,
+        "max_custom_vs_cublas_relative_to_peak": 0.0015822784810126582,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 1.4600120013273215e-05,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 1.4600120013273215e-05
+      }
+    },
+    {
+      "name": "k_proj",
+      "out_features": 128,
+      "in_features": 896,
+      "bias": true,
+      "gemv": {
+        "custom_p50_ms": 0.014751999638974667,
+        "cublas_p50_ms": 0.02070399932563305,
+        "custom_over_cublas": 0.7125193257087593,
+        "max_custom_vs_cublas_relative_to_peak": 6.009615384615385e-05,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.0011258638822115384,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.0011258638822115384
+      },
+      "gemm": {
+        "tokens": 32,
+        "custom_p50_ms": 0.16732800006866455,
+        "cublas_p50_ms": 0.02377600036561489,
+        "custom_over_cublas": 7.037684955231415,
+        "max_custom_vs_cublas_relative_to_peak": 0.0038461538461538464,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.0011258638822115384,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.0011258638822115384
+      }
+    },
+    {
+      "name": "v_proj",
+      "out_features": 128,
+      "in_features": 896,
+      "bias": true,
+      "gemv": {
+        "custom_p50_ms": 0.014527999795973301,
+        "cublas_p50_ms": 0.019648000597953796,
+        "custom_over_cublas": 0.7394136478948546,
+        "max_custom_vs_cublas_relative_to_peak": 0.0029069767441860465,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.00019397292026253633,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.00019397292026253633
+      },
+      "gemm": {
+        "tokens": 32,
+        "custom_p50_ms": 0.1674560010433197,
+        "cublas_p50_ms": 0.02518399991095066,
+        "custom_over_cublas": 6.649301208522696,
+        "max_custom_vs_cublas_relative_to_peak": 0.004032258064516129,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.00013452960598853326,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.00013452960598853326
+      }
+    },
+    {
+      "name": "o_proj",
+      "out_features": 896,
+      "in_features": 896,
+      "bias": false,
+      "gemv": {
+        "custom_p50_ms": 0.0506879985332489,
+        "cublas_p50_ms": 0.03206399828195572,
+        "custom_over_cublas": 1.5808383623128497,
+        "max_custom_vs_cublas_relative_to_peak": 0.001282051282051282,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.00025080167330228365,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.00025080167330228365
+      },
+      "gemm": {
+        "tokens": 32,
+        "custom_p50_ms": 1.0868159532546997,
+        "cublas_p50_ms": 0.026623999699950218,
+        "custom_over_cublas": 40.820912165828034,
+        "max_custom_vs_cublas_relative_to_peak": 6.975446428571428e-05,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.00021833181381225586,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.00021833181381225586
+      }
+    },
+    {
+      "name": "gate_proj",
+      "out_features": 4864,
+      "in_features": 896,
+      "bias": false,
+      "gemv": {
+        "custom_p50_ms": 0.3128319978713989,
+        "cublas_p50_ms": 0.11459200084209442,
+        "custom_over_cublas": 2.7299636586542846,
+        "max_custom_vs_cublas_relative_to_peak": 0.0,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.00011623347247088397,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.00011623347247088397
+      },
+      "gemm": {
+        "tokens": 32,
+        "custom_p50_ms": 5.834496021270752,
+        "cublas_p50_ms": 0.11273600161075592,
+        "custom_over_cublas": 51.7536185238815,
+        "max_custom_vs_cublas_relative_to_peak": 0.00022007042253521127,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 8.840292272433429e-05,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 8.840292272433429e-05
+      }
+    },
+    {
+      "name": "up_proj",
+      "out_features": 4864,
+      "in_features": 896,
+      "bias": false,
+      "gemv": {
+        "custom_p50_ms": 0.3128319978713989,
+        "cublas_p50_ms": 0.11177600175142288,
+        "custom_over_cublas": 2.7987402749214603,
+        "max_custom_vs_cublas_relative_to_peak": 0.0,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.0014416906568739149,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.0014416906568739149
+      },
+      "gemm": {
+        "tokens": 32,
+        "custom_p50_ms": 5.834239959716797,
+        "cublas_p50_ms": 0.11187200248241425,
+        "custom_over_cublas": 52.15102823098131,
+        "max_custom_vs_cublas_relative_to_peak": 8.445945945945946e-05,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.001122180835620777,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.001122180835620777
+      }
+    },
+    {
+      "name": "down_proj",
+      "out_features": 896,
+      "in_features": 4864,
+      "bias": false,
+      "gemv": {
+        "custom_p50_ms": 0.1780479997396469,
+        "cublas_p50_ms": 0.11785600334405899,
+        "custom_over_cublas": 1.5107249074098366,
+        "max_custom_vs_cublas_relative_to_peak": 0.0045662100456621,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.00027282923868257705,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.0003633455598735374
+      },
+      "gemm": {
+        "tokens": 32,
+        "custom_p50_ms": 5.969503879547119,
+        "cublas_p50_ms": 0.10793600231409073,
+        "custom_over_cublas": 55.305956785170075,
+        "max_custom_vs_cublas_relative_to_peak": 0.0008278145695364238,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.00019784636844862375,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.00019784636844862375
+      }
+    },
+    {
+      "name": "tied_lm_head",
+      "out_features": 151936,
+      "in_features": 896,
+      "bias": false,
+      "gemv": {
+        "custom_p50_ms": 9.529439926147461,
+        "cublas_p50_ms": 2.7347519397735596,
+        "custom_over_cublas": 3.4845719597282776,
+        "max_custom_vs_cublas_relative_to_peak": 0.0016339869281045752,
+        "sampled_max_custom_vs_fp32_relative_to_peak": 0.0003230026344847835,
+        "sampled_max_cublas_vs_fp32_relative_to_peak": 0.0003230026344847835
+      }
+    }
+  ],
+  "aggregates": {
+    "decode_linear_only": {
+      "formula": "24 * sum(layer q/k/v/o/gate/up/down GEMV) + tied LM Head GEMV",
+      "custom_p50_estimate_ms": 31.990367740392685,
+      "cublas_p50_estimate_ms": 13.60963200032711,
+      "custom_over_cublas": 2.350568166694279
+    },
+    "prefill_linear_only_one_layer": {
+      "formula": "sum(layer q/k/v/o/gate/up/down GEMM), tokens=32",
+      "custom_p50_ms": 20.146911829710007,
+      "cublas_p50_ms": 0.44192000664770603,
+      "custom_over_cublas": 45.589499290922376
+    }
+  },
+  "correctness": {
+    "max_custom_vs_cublas_abs_error_relative_to_case_output_peak": 0.0045662100456621,
+    "max_sampled_abs_error_vs_fp32_relative_to_case_output_peak": 0.0014416906568739149,
+    "unit_test": "CudaBFloat16.LinearCustomAndCublasMatchFp32Reference",
+    "full_tests_passed": 22,
+    "full_tests_failed": 0
+  },
+  "selection": {
+    "w16a16_default": "cublas",
+    "fp32_default": "custom",
+    "cli": "--linear-kernel custom|cublas",
+    "legacy_alias": "--cublas",
+    "status": "provisional_until_cp12_end_to_end_validation"
+  },
+  "scope_warning": "Linear-only microbenchmark; not end-to-end W16A16 latency or throughput."
+}
