@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "checkpoint": 4,
+  "status": "accepted",
+  "description": "CUDA FP32 and W8A32 legacy-serial reference on Qwen2.5-0.5B-Instruct",
+  "source": {
+    "commit": "fc0dd53ae23f8cd767eb5df612cef560276a0161",
+    "canonical_token_ids_sha256": "276b5e68378bdc32ce22e20e8e055feb456f1cfb31fc2d2406422ab6a291b24f",
+    "models": {
+      "fp32": {
+        "path": "models/qwen2.5-0.5b-instruct/model.fp32.qbin",
+        "sha256": "a58918c8fcbe0332c3a09d233f14425d1ecf32facca658b92203ff89d81c0b63"
+      },
+      "w8a32": {
+        "path": "models/qwen2.5-0.5b-instruct/model.int8.qbin",
+        "sha256": "6315f60dce24ee6f4e2b9609c69df222c2d02e78f37f1c1f21d13d8b20793d90"
+      }
+    },
+    "raw_results": [
+      "results/cuda-fp32-serial.json",
+      "results/cuda-w8a32-serial.json"
+    ],
+    "nsight_traces": {
+      "fp32": {
+        "path": "profiles/cuda-fp32-serial-short.nsys-rep",
+        "sha256": "a4dc719db35d19405bf50e25b6ff1cba6a8b35f265e56092d733c3ee77ca0af5"
+      },
+      "w8a32": {
+        "path": "profiles/cuda-w8a32-serial-short.nsys-rep",
+        "sha256": "b175c2aa402c6115308f831f649a0e58fdc63ccc79013d3276697bad8809e46d"
+      }
+    }
+  },
+  "environment": {
+    "device": "Jetson Orin Nano Super 8GB",
+    "power_mode": "MAXN_SUPER",
+    "cuda_compiler": "12.6.68",
+    "nsight_systems": "2024.5.4.34",
+    "build_type": "Release",
+    "clock_control": {
+      "locked_during_each_run": true,
+      "restored_after_each_run": true,
+      "post_run_verified": true,
+      "post_run_cpu_governor": "schedutil",
+      "post_run_emc_frequency_override": 0,
+      "post_run_fan_control": "dynamic"
+    }
+  },
+  "formal_workload": {
+    "prompt_tokens": 32,
+    "generated_tokens": 128,
+    "max_sequence_length": 256,
+    "batch_size": 1,
+    "decoding": "greedy_argmax",
+    "early_stop": false,
+    "prefill_mode": "serial_legacy",
+    "warmup": 5,
+    "repeat": 20,
+    "cpu_affinity": "0-5"
+  },
+  "formal_runs": {
+    "cuda_fp32": {
+      "timestamp_utc": "2026-08-01T05:58:37.077023+00:00",
+      "linear_path": "custom FP32 GEMV; tied LM Head uses cuBLAS GEMV",
+      "metrics": {
+        "ttft_ms": {"mean": 1388.867134, "p50": 1388.880650, "p95": 1389.076373, "cv_percent": 0.010755},
+        "serial_prompt_tokens_per_second": {"mean": 23.040361, "p05": 23.033894, "p50": 23.040080, "p95": 23.044559, "cv_percent": 0.010754},
+        "decode_tokens_per_second": {"mean": 22.877760, "p05": 22.874345, "p50": 22.877565, "p95": 22.880985, "cv_percent": 0.009259},
+        "tpot_ms": {"mean": 43.710573, "p50": 43.710313, "p95": 43.715886, "cv_percent": 0.009259},
+        "total_ms": {"mean": 6940.110493, "p50": 6940.075907, "p95": 6940.894691, "cv_percent": 0.008870}
+      },
+      "memory_mib": {"model_archive": 1885.59, "device_weights": 1884.59, "peak_rss": 4092.55, "kv_cache": 6.0, "workspace": 0.65},
+      "telemetry": {"sample_count": 1324, "mean_system_ram_used_mb": 3384.527, "mean_vdd_in_w": 14.649700, "energy_per_generated_token_joules": 0.793480, "max_gpu_temperature_c": 69.343}
+    },
+    "cuda_w8a32": {
+      "timestamp_utc": "2026-08-01T06:01:56.524213+00:00",
+      "linear_path": "grouped INT8 weight and FP32 activation custom GEMV; tied LM Head remains FP32 cuBLAS GEMV",
+      "metrics": {
+        "ttft_ms": {"mean": 958.335419, "p50": 958.327852, "p95": 958.662723, "cv_percent": 0.020608},
+        "serial_prompt_tokens_per_second": {"mean": 33.391233, "p05": 33.373948, "p50": 33.391179, "p95": 33.402345, "cv_percent": 0.020606},
+        "decode_tokens_per_second": {"mean": 33.051952, "p05": 33.040504, "p50": 33.052065, "p95": 33.059831, "cv_percent": 0.016722},
+        "tpot_ms": {"mean": 30.255400, "p50": 30.255141, "p95": 30.264693, "cv_percent": 0.016724},
+        "total_ms": {"mean": 4800.771931, "p50": 4800.695168, "p95": 4802.228867, "cv_percent": 0.016310}
+      },
+      "memory_mib": {"model_archive": 883.16, "device_weights": 882.16, "peak_rss": 2085.98, "kv_cache": 6.0, "workspace": 0.65},
+      "telemetry": {"sample_count": 916, "mean_system_ram_used_mb": 2220.539, "mean_vdd_in_w": 15.253540, "energy_per_generated_token_joules": 0.571439, "max_gpu_temperature_c": 71.625}
+    }
+  },
+  "comparison": {
+    "w8a32_vs_fp32": {
+      "decode_throughput_speedup": 1.444720,
+      "ttft_speedup": 1.449250,
+      "total_latency_speedup": 1.445624,
+      "device_weight_reduction_percent": 53.190577,
+      "peak_rss_reduction_percent": 49.029822,
+      "mean_power_increase_percent": 4.121861,
+      "energy_per_token_reduction_percent": 27.983186
+    },
+    "cuda_fp32_vs_cpu_fp32_6_threads": {
+      "decode_throughput_speedup": 1.722507,
+      "ttft_speedup": 1.672615,
+      "total_latency_speedup": 1.713374,
+      "energy_per_token_reduction_percent": 34.882581
+    },
+    "cuda_w8a32_vs_cpu_fp32_6_threads": {
+      "decode_throughput_speedup": 2.488541,
+      "ttft_speedup": 2.424037,
+      "total_latency_speedup": 2.476894,
+      "energy_per_token_reduction_percent": 53.104509
+    }
+  },
+  "nsight_short_trace": {
+    "workload": {"prompt_tokens": 32, "generated_tokens": 8, "prefill_forward_tokens": 32, "decode_forward_tokens": 7, "total_forward_tokens": 39},
+    "common_counts": {"gpu_operations_per_forward_token": 389, "kernel_launches_per_forward_token": 388, "d2h_argmax_copies_per_forward_token": 1, "prefill_kernel_launches": 12416},
+    "cuda_fp32_prefill": {
+      "nvtx_wall_ms": 1447.652192,
+      "gpu_projection_ms": 1446.957952,
+      "gpu_kernel_total_ms": 1409.388576,
+      "kernel_categories": {
+        "layer_gemv": {"instances": 5376, "total_ms": 1180.747424, "kernel_time_percent": 83.777281},
+        "tied_lm_head_gemv": {"instances": 32, "total_ms": 174.128640, "kernel_time_percent": 12.354906},
+        "causal_attention": {"instances": 768, "total_ms": 10.178432, "kernel_time_percent": 0.722188},
+        "argmax": {"instances": 32, "total_ms": 13.851840, "kernel_time_percent": 0.982826},
+        "other": {"total_ms": 30.482240, "kernel_time_percent": 2.162799}
+      },
+      "kernel_launch_api": {"calls": 12416, "total_ms": 85.648544, "average_us": 6.898240, "nvtx_wall_percent": 5.916376},
+      "argmax_d2h_sync_boundary": {"calls": 32, "cuda_memcpy_async_api_ms": 1291.362848, "note": "API duration includes waiting for preceding stream work and is not pure copy overhead"},
+      "redundant_prompt_finalization": {"avoidable_lm_head_calls": 31, "avoidable_argmax_calls": 31, "estimated_gpu_kernel_ms": 182.106090, "nvtx_wall_percent": 12.579409}
+    },
+    "cuda_w8a32_prefill": {
+      "nvtx_wall_ms": 1026.354464,
+      "gpu_projection_ms": 1025.372320,
+      "gpu_kernel_total_ms": 976.388000,
+      "kernel_categories": {
+        "layer_gemv": {"instances": 5376, "total_ms": 750.219424, "kernel_time_percent": 76.836199},
+        "tied_lm_head_gemv": {"instances": 32, "total_ms": 174.494208, "kernel_time_percent": 17.871400},
+        "causal_attention": {"instances": 768, "total_ms": 10.212704, "kernel_time_percent": 1.045968},
+        "argmax": {"instances": 32, "total_ms": 13.856032, "kernel_time_percent": 1.419111},
+        "other": {"total_ms": 27.605632, "kernel_time_percent": 2.827322}
+      },
+      "kernel_launch_api": {"calls": 12416, "total_ms": 85.063648, "average_us": 6.851131, "nvtx_wall_percent": 8.287941},
+      "argmax_d2h_sync_boundary": {"calls": 32, "cuda_memcpy_async_api_ms": 870.458048, "note": "API duration includes waiting for preceding stream work and is not pure copy overhead"},
+      "redundant_prompt_finalization": {"avoidable_lm_head_calls": 31, "avoidable_argmax_calls": 31, "estimated_gpu_kernel_ms": 182.464295, "nvtx_wall_percent": 17.777902}
+    },
+    "cross_precision": {"layer_gemv_gpu_time_speedup": 1.573869, "tied_lm_head_time_ratio_w8a32_over_fp32": 1.002099}
+  },
+  "acceptance": {
+    "decode_cv_limit_percent": 3.0,
+    "cuda_fp32_decode_cv_percent": 0.009259,
+    "cuda_w8a32_decode_cv_percent": 0.016722,
+    "passed": true
+  },
+  "notes": [
+    "Nsight percentages use GPU kernel time inside the qwen2.prefill NVTX range; kernel launch API time is reported separately and must not be added to GPU kernel time.",
+    "The first FP32 launch attempt failed before measurement because of transient shared-memory pressure; no partial result was kept, no process was killed, and the accepted run followed successful FP32/W8A32 smoke checks.",
+    "W8A32 uses INT8 Linear weights with FP32 activations and is not the future BF16-activation W8A16 path."
+  ]
+}
