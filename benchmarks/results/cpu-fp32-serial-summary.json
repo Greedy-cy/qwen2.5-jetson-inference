@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "checkpoint": 3,
+  "status": "accepted",
+  "description": "Qwen2.5-0.5B-Instruct CPU FP32 legacy-serial baseline on Jetson Orin Nano Super",
+  "source": {
+    "commit": "42ec8a9dc5490635054d2a7eb2f283d1a4d9484a",
+    "model_archive": "models/qwen2.5-0.5b-instruct/model.fp32.qbin",
+    "model_sha256": "a58918c8fcbe0332c3a09d233f14425d1ecf32facca658b92203ff89d81c0b63",
+    "token_ids_sha256": "276b5e68378bdc32ce22e20e8e055feb456f1cfb31fc2d2406422ab6a291b24f",
+    "raw_results": [
+      "results/cpu-fp32-1thread-serial.json",
+      "results/cpu-fp32-6threads-serial.json"
+    ]
+  },
+  "workload": {
+    "prompt_tokens": 32,
+    "generated_tokens": 128,
+    "max_sequence_length": 256,
+    "batch_size": 1,
+    "decoding": "greedy_argmax",
+    "early_stop": false,
+    "prefill_mode": "serial_legacy"
+  },
+  "environment": {
+    "device": "Jetson Orin Nano Super 8GB",
+    "power_mode": "MAXN_SUPER",
+    "cuda_compiler": "12.6.68",
+    "build_type": "Release",
+    "blas": "/usr/lib/aarch64-linux-gnu/libopenblas.so",
+    "clock_control": {
+      "locked_during_each_run": true,
+      "restored_by_finally": true,
+      "post_run_verified": true,
+      "post_run_cpu_governor": "schedutil",
+      "post_run_emc_frequency_override": 0,
+      "post_run_fan_control": "dynamic"
+    }
+  },
+  "runs": {
+    "one_thread_diagnostic": {
+      "timestamp_utc": "2026-08-01T05:31:09.087858+00:00",
+      "warmup": 1,
+      "repeat": 5,
+      "cpu_affinity": "0",
+      "openblas_threads": 1,
+      "omp_threads": 1,
+      "metrics": {
+        "ttft_ms": {"mean": 5567.988603, "p50": 5568.079249, "p95": 5570.740131, "cv_percent": 0.036184},
+        "prefill_tokens_per_second": {"mean": 5.747139, "p05": 5.744300, "p50": 5.747045, "p95": 5.750399, "cv_percent": 0.036187},
+        "decode_tokens_per_second": {"mean": 5.679086, "p05": 5.677334, "p50": 5.679330, "p95": 5.680010, "cv_percent": 0.016097},
+        "tpot_ms": {"mean": 176.084664, "p50": 176.077093, "p95": 176.139009, "cv_percent": 0.016100},
+        "total_ms": {"mean": 27930.742273, "p50": 27930.478614, "p95": 27934.486985, "cv_percent": 0.010030}
+      },
+      "memory_mib": {"model_archive": 1885.59, "peak_rss": 2059.48, "kv_cache": 6.0, "workspace": 0.65},
+      "telemetry": {
+        "sample_count": 1327,
+        "mean_system_ram_used_mb": 2931.754,
+        "mean_vdd_in_w": 9.074049,
+        "energy_per_generated_token_joules": 1.978457,
+        "max_cpu_temperature_c": 61.593
+      }
+    },
+    "six_thread_formal": {
+      "timestamp_utc": "2026-08-01T05:34:49.564671+00:00",
+      "warmup": 5,
+      "repeat": 20,
+      "cpu_affinity": "0-5",
+      "openblas_threads": 6,
+      "omp_threads": 6,
+      "metrics": {
+        "ttft_ms": {"mean": 2323.040683, "p50": 2311.586864, "p95": 2315.509533, "max": 2553.135632, "cv_percent": 2.276564},
+        "prefill_tokens_per_second": {"mean": 13.781582, "p05": 12.533608, "p50": 13.842341, "p95": 13.877211, "cv_percent": 2.082166},
+        "decode_tokens_per_second": {"mean": 13.281661, "p05": 12.191037, "p50": 13.423095, "p95": 13.445279, "cv_percent": 2.409972},
+        "tpot_ms": {"mean": 75.338289, "p50": 74.488179, "p95": 79.313189, "cv_percent": 2.561831},
+        "total_ms": {"mean": 11891.004373, "p50": 11772.948457, "p95": 12625.911802, "cv_percent": 2.309102}
+      },
+      "memory_mib": {"model_archive": 1885.59, "peak_rss": 2059.27, "kv_cache": 6.0, "workspace": 0.65},
+      "telemetry": {
+        "sample_count": 2245,
+        "mean_system_ram_used_mb": 2936.008,
+        "mean_vdd_in_w": 13.120573,
+        "energy_per_generated_token_joules": 1.218537,
+        "max_cpu_temperature_c": 69.656
+      }
+    }
+  },
+  "comparison": {
+    "decode_throughput_speedup": 2.338697,
+    "prefill_throughput_speedup": 2.397990,
+    "ttft_speedup": 2.396854,
+    "total_latency_speedup": 2.348897,
+    "six_core_decode_scaling_efficiency_percent": 38.978279,
+    "energy_per_token_reduction_percent": 38.409735
+  },
+  "acceptance": {
+    "formal_decode_cv_limit_percent": 3.0,
+    "formal_decode_cv_percent": 2.409972,
+    "passed": true
+  }
+}
