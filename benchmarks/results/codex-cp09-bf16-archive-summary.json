@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "checkpoint": "CODEX-CP09",
+  "title": "BF16 archive and dtype system",
+  "status": "passed",
+  "implementation_commit": "295c6f3e32c754cf06e787510807ffb0f7e60937",
+  "device": {
+    "name": "Jetson Orin Nano Super 8GB",
+    "cuda": "12.6"
+  },
+  "source_model": {
+    "name": "Qwen2.5-0.5B-Instruct",
+    "safetensors_bytes": 988097824,
+    "safetensors_sha256": "fdf756fa7fcbe7404d5c60e26bff1a0c8b8aa1f72ced49e7dd0210fe288fb7fe"
+  },
+  "archives": {
+    "fp32": {
+      "file": "model.fp32.qbin",
+      "bytes": 1977179648,
+      "sha256": "a58918c8fcbe0332c3a09d233f14425d1ecf32facca658b92203ff89d81c0b63"
+    },
+    "w8a32": {
+      "file": "model.int8.qbin",
+      "bytes": 926064128,
+      "sha256": "6315f60dce24ee6f4e2b9609c69df222c2d02e78f37f1c1f21d13d8b20793d90"
+    },
+    "w16a16": {
+      "file": "model.w16a16.qbin",
+      "logical_precision": "w16a16",
+      "storage_dtype": "bfloat16",
+      "bytes": 989114112,
+      "payload_bytes": 988065536,
+      "fp32_size_ratio_percent": 50.0265,
+      "fp32_size_reduction_percent": 49.9735,
+      "sha256": "f8b6b16a3a85d70083bfd7f822a7d587332982b0f0e27691512efa844855b2a6",
+      "tensor_count": 290,
+      "dtype_counts": {
+        "float32": 0,
+        "bfloat16": 290,
+        "int8": 0
+      },
+      "max_bfloat16_abs_error": 0,
+      "mean_tensor_bfloat16_abs_error": 0
+    }
+  },
+  "required_tensor_coverage": {
+    "embedding": "model.embed_tokens.weight",
+    "final_norm": "model.norm.weight",
+    "layer_norm": "model.layers.0.input_layernorm.weight",
+    "bias": "model.layers.0.self_attn.q_proj.bias",
+    "tie_word_embeddings": true,
+    "separate_lm_head_tensor": false,
+    "tied_lm_head_uses_bfloat16_embedding": true
+  },
+  "verification": {
+    "round_to_nearest_even_self_test": true,
+    "shape_and_nbytes_verified": true,
+    "alignment_and_bounds_verified": true,
+    "all_tensor_sha256_verified": true,
+    "cpp_mmap_bfloat16_load_test": true,
+    "inspect_fp32": true,
+    "inspect_w8a32": true,
+    "inspect_w16a16": true,
+    "ctest_passed": 19,
+    "ctest_failed": 0
+  },
+  "runtime_boundary": {
+    "archive_and_inspect_supported": true,
+    "bfloat16_inference_kernels_supported": false,
+    "inference_request_fails_explicitly": true,
+    "rejection_message": "W16A16 uses BF16; archive support is ready but BF16 runtime kernels are not implemented"
+  },
+  "artifacts": {
+    "raw_export_log": "results/codex-cp09-bf16-export.log",
+    "full_export_report": "models/qwen2.5-0.5b-instruct/export_report.json",
+    "report": "docs/codex-cp09-bf16-archive-and-type-system.md"
+  },
+  "notes": [
+    "The source safetensors stores BF16 values, so BF16 re-encoding is bit-exact and reconstruction error is zero.",
+    "A16 means BF16 in this project; FP16 is not used.",
+    "A CUDA W8A32 compatibility smoke reached device allocation but was not completed because NvMap could not allocate the approximately 1 GiB weight buffer under current memory pressure; archive inspect and existing kernel regressions passed."
+  ]
+}

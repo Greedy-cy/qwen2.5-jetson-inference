@@ -3,8 +3,8 @@
 这是一个面向性能分析的 batch=1 Qwen2.5 推理框架。运行时只依赖 C++17、
 CUDA/cuBLAS 和 OpenBLAS，不依赖 PyTorch/Transformers。当前模型固定为
 `Qwen/Qwen2.5-0.5B-Instruct`，支持完整矩阵化 Prefill、KV Cache、单 token
-Decode、CPU/CUDA FP32、group-size=64 的 W8A32、greedy decoding、统一 benchmark
-与 Nsight Systems 标注。
+Decode、CPU/CUDA FP32、group-size=64 的 W8A32、BF16 W16A16 归档、
+greedy decoding、统一 benchmark 与 Nsight Systems 标注。
 
 当前运行时不保留“逐 token 调用 Decode 来模拟 Prefill”的模式。Prompt 阶段的唯一
 正式实现就是矩阵化 Prefill；单 token 前向仅作为模型内部的 Decode 实现存在。
@@ -121,8 +121,11 @@ scale tensor、量化轴和 group size。C++ 使用只读 `mmap`，CUDA 初始�
 
 - `model.fp32.qbin`
 - `model.int8.qbin`，即 W8A32
+- `model.w16a16.qbin`，全部浮点 tensor 使用 BF16
 
-后续名为 W16A16/W8A16 的 A16 路径使用 BF16，不使用 FP16。
+W16A16 归档与 `inspect` 已支持，BF16 推理算子将在后续 checkpoint 接通。
+本项目的 W16A16/W8A16 中 A16 均指 BF16，不使用 FP16。完整验证见
+[CODEX-CP09](docs/codex-cp09-bf16-archive-and-type-system.md)。
 
 ## 目录与文档命名
 
@@ -143,6 +146,7 @@ scale tensor、量化轴和 group size。C++ 使用只读 `mmap`，CUDA 初始�
 - 只支持 Qwen2 架构、batch=1 和 greedy decoding。
 - Prefill causal attention 不是 FlashAttention，也不支持 chunked Prefill。
 - 当前 W8A32 Prefill GEMM 以正确性和可读性为主，尚未达到成熟 GEMM 的数据复用效率。
+- W16A16 当前只支持 BF16 归档、类型解析和检查，尚不能执行 BF16 推理。
 - Jetson 为统一内存设备，峰值内存需结合 RSS 与 `tegrastats`，不能套用桌面卡的
   `nvidia-smi --query-compute-apps` 口径。
 - 绝对性能数字必须附带 commit、模型 SHA、功耗模式、CUDA 版本和 benchmark JSON。
