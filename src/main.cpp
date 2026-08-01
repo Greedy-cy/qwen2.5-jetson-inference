@@ -44,7 +44,6 @@ void usage() {
       "  llm_infer generate --model DIR --prompt TEXT [--backend cpu|cuda]\n"
       "                     [--precision fp32|w8a32] [--max-new-tokens 128]\n"
       "                     [--max-seq-len 2048] [--system TEXT] [--raw] [--cublas]\n"
-      "                     [--prefill-mode auto|serial|batched]\n"
       "  llm_infer benchmark --model DIR (--prompt TEXT | --token-ids CSV)\n"
       "                      [--warmup 5] [--repeat 20] [--json FILE]\n"
       "                      [--telemetry-markers] [other generation options]\n"
@@ -71,7 +70,6 @@ infer::RuntimeOptions runtime_options(const Arguments& args) {
   options.precision = parse_precision(args.get("--precision", "fp32"));
   options.max_sequence_length = args.get_int("--max-seq-len", 2048);
   options.use_cublas_gemv = args.has("--cublas");
-  options.prefill_mode = infer::parse_prefill_mode(args.get("--prefill-mode", "auto"));
   return options;
 }
 
@@ -297,8 +295,7 @@ void benchmark(const Arguments& args) {
         {"batch_size", 1},
         {"decoding", "greedy_argmax"},
         {"early_stop", false},
-        {"prefill_mode", infer::to_string(options.prefill_mode)},
-        {"effective_prefill_mode", infer::to_string(model.effective_prefill_mode(prompt.size()))},
+        {"prefill_implementation", "matrixized"},
         {"max_sequence_length", options.max_sequence_length},
         {"use_cublas_gemv", options.use_cublas_gemv},
         {"warmup", warmup},

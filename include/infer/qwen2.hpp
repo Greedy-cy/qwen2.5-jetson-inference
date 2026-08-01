@@ -12,7 +12,6 @@ struct RuntimeOptions {
   Precision precision{Precision::kFloat32};
   int max_sequence_length{2048};
   bool use_cublas_gemv{false};
-  PrefillMode prefill_mode{PrefillMode::kAuto};
 };
 
 struct GenerationStats {
@@ -44,14 +43,12 @@ class Qwen2Model {
                             bool stop_on_eos = true);
   int prefill(const std::vector<int>& prompt_tokens);
   int decode_next(int token);
-  int forward_token(int token, int position);
   std::vector<float> last_logits_host() const;
   void reset();
 
   const ModelConfig& config() const { return config_; }
   const ModelArchive& archive() const { return archive_; }
   const RuntimeOptions& options() const { return options_; }
-  PrefillMode effective_prefill_mode(size_t prompt_tokens) const;
   int position() const { return position_; }
   bool has_prefilled() const { return has_prefilled_; }
   size_t workspace_bytes() const {
@@ -82,10 +79,11 @@ class Qwen2Model {
   const float* optional_float_weight(std::string_view name) const;
   float* layer_key_cache(int layer);
   float* layer_value_cache(int layer);
-  int forward_cpu(int token, int position);
+  int decode_token(int token, int position);
+  int decode_token_cpu(int token, int position);
   int prefill_cpu_fp32(const std::vector<int>& prompt_tokens);
   int prefill_cuda(const std::vector<int>& prompt_tokens);
-  int forward_cuda(int token, int position);
+  int decode_token_cuda(int token, int position);
   void synchronize() const;
 
   RuntimeOptions options_;

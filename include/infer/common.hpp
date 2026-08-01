@@ -30,28 +30,15 @@ namespace infer {
 enum class Device { kCpu, kCuda };
 enum class DType { kFloat32, kInt8 };
 enum class Precision { kFloat32, kInt8 };
-enum class PrefillMode { kAuto, kSerial, kBatched };
 
 inline const char* to_string(Device v) { return v == Device::kCpu ? "cpu" : "cuda"; }
 inline const char* to_string(Precision v) { return v == Precision::kFloat32 ? "fp32" : "w8a32"; }
-inline const char* to_string(PrefillMode v) {
-  if (v == PrefillMode::kAuto) return "auto";
-  if (v == PrefillMode::kSerial) return "serial";
-  return "batched";
-}
 inline size_t dtype_size(DType v) { return v == DType::kFloat32 ? sizeof(float) : sizeof(int8_t); }
 
 class Error : public std::runtime_error {
  public:
   using std::runtime_error::runtime_error;
 };
-
-inline PrefillMode parse_prefill_mode(std::string_view text) {
-  if (text == "auto") return PrefillMode::kAuto;
-  if (text == "serial") return PrefillMode::kSerial;
-  if (text == "batched") return PrefillMode::kBatched;
-  throw Error("prefill mode must be auto, serial, or batched");
-}
 
 #define INFER_CHECK(cond, message) \
   do { if (!(cond)) throw ::infer::Error(message); } while (false)

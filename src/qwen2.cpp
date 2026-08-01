@@ -45,6 +45,9 @@ Qwen2Model::Qwen2Model(const std::filesystem::path& model_directory,
   INFER_CHECK(options_.max_sequence_length > 0, "max sequence length must be positive");
   INFER_CHECK(options_.max_sequence_length <= config_.max_position_embeddings,
               "max sequence length exceeds model limit");
+  INFER_CHECK(options_.backend != Device::kCpu ||
+                  options_.precision == Precision::kFloat32,
+              "CPU backend currently supports FP32 only");
   initialize_weights();
   initialize_workspace();
 }
@@ -104,39 +107,34 @@ void Qwen2Model::initialize_workspace() {
   logits_ = take(vocab);
   attention_scores_ = take(options_.max_sequence_length);
 
-  if (options_.prefill_mode != PrefillMode::kSerial &&
-      ((options_.backend == Device::kCpu &&
-        options_.precision == Precision::kFloat32) ||
-       options_.backend == Device::kCuda)) {
-    const size_t row_width =
-        static_cast<size_t>(hidden) * 5 + static_cast<size_t>(kv) * 2 +
-        static_cast<size_t>(intermediate) * 3;
-    const size_t prefill_float_count =
-        static_cast<size_t>(options_.max_sequence_length) * row_width;
-    prefill_workspace_.resize(
-        align_up(prefill_float_count * sizeof(float)), options_.backend);
-    auto* prefill_base = static_cast<float*>(prefill_workspace_.data());
-    size_t prefill_cursor = 0;
-    auto take_prefill = [&](int width) {
-      float* result = prefill_base + prefill_cursor;
-      prefill_cursor +=
-          static_cast<size_t>(options_.max_sequence_length) * width;
-      return result;
-    };
-    prefill_x_ = take_prefill(hidden);
-    prefill_norm_ = take_prefill(hidden);
-    prefill_q_ = take_prefill(hidden);
-    prefill_k_ = take_prefill(kv);
-    prefill_v_ = take_prefill(kv);
-    prefill_attention_ = take_prefill(hidden);
-    prefill_hidden_tmp_ = take_prefill(hidden);
-    prefill_gate_ = take_prefill(intermediate);
-    prefill_up_ = take_prefill(intermediate);
-    prefill_mlp_ = take_prefill(intermediate);
-    if (options_.backend == Device::kCuda) {
-      prefill_tokens_.resize(
-          options_.max_sequence_length * sizeof(int), Device::kCuda);
-    }
+  const size_t row_width =
+      static_cast<size_t>(hidden) * 5 + static_cast<size_t>(kv) * 2 +
+      static_cast<size_t>(intermediate) * 3;
+  const size_t prefill_float_count =
+      static_cast<size_t>(options_.max_sequence_length) * row_width;
+  prefill_workspace_.resize(
+      align_up(prefill_float_count * sizeof(float)), options_.backend);
+  auto* prefill_base = static_cast<float*>(prefill_workspace_.data());
+  size_t prefill_cursor = 0;
+  auto take_prefill = [&](int width) {
+    float* result = prefill_base + prefill_cursor;
+    prefill_cursor +=
+        static_cast<size_t>(options_.max_sequence_length) * width;
+    return result;
+  };
+  prefill_x_ = take_prefill(hidden);
+  prefill_norm_ = take_prefill(hidden);
+  prefill_q_ = take_prefill(hidden);
+  prefill_k_ = take_prefill(kv);
+  prefill_v_ = take_prefill(kv);
+  prefill_attention_ = take_prefill(hidden);
+  prefill_hidden_tmp_ = take_prefill(hidden);
+  prefill_gate_ = take_prefill(intermediate);
+  prefill_up_ = take_prefill(intermediate);
+  prefill_mlp_ = take_prefill(intermediate);
+  if (options_.backend == Device::kCuda) {
+    prefill_tokens_.resize(
+        options_.max_sequence_length * sizeof(int), Device::kCuda);
   }
 
   const size_t per_layer = static_cast<size_t>(config_.num_kv_heads) *
@@ -258,7 +256,7 @@ float* Qwen2Model::layer_value_cache(int layer) {
          static_cast<size_t>(config_.num_layers + layer) * per_layer;
 }
 
-int Qwen2Model::forward_cpu(int token, int position) {
+int Qwen2Model::decode_token_cpu(int token, int position) {
   const int hidden = config_.hidden_size;
   const int kv_dim = config_.kv_dim();
   const int head_dim = config_.head_dim();
@@ -312,9 +310,9 @@ int Qwen2Model::forward_cpu(int token, int position) {
 int Qwen2Model::prefill_cpu_fp32(const std::vector<int>& prompt_tokens) {
   INFER_CHECK(options_.backend == Device::kCpu &&
                   options_.precision == Precision::kFloat32,
-              "batched prefill currently supports CPU FP32 only");
+              "matrixized prefill currently supports CPU FP32 only");
   INFER_CHECK(prefill_workspace_.data() != nullptr,
-              "batched prefill workspace was not allocated");
+              "matrixized prefill workspace was not allocated");
   const int token_count = static_cast<int>(prompt_tokens.size());
   const int hidden = config_.hidden_size;
   const int kv_dim = config_.kv_dim();
@@ -380,10 +378,10 @@ int Qwen2Model::prefill_cpu_fp32(const std::vector<int>& prompt_tokens) {
 
 int Qwen2Model::prefill_cuda(const std::vector<int>& prompt_tokens) {
   INFER_CHECK(options_.backend == Device::kCuda,
-              "CUDA batched prefill requires CUDA backend");
+              "CUDA matrixized prefill requires CUDA backend");
   INFER_CHECK(prefill_workspace_.data() != nullptr &&
                   prefill_tokens_.data() != nullptr,
-              "CUDA batched prefill workspace was not allocated");
+              "CUDA matrixized prefill workspace was not allocated");
   const int token_count = static_cast<int>(prompt_tokens.size());
   const int hidden = config_.hidden_size;
   const int kv_dim = config_.kv_dim();
@@ -462,7 +460,7 @@ int Qwen2Model::prefill_cuda(const std::vector<int>& prompt_tokens) {
   return result;
 }
 
-int Qwen2Model::forward_cuda(int token, int position) {
+int Qwen2Model::decode_token_cuda(int token, int position) {
   const int hidden = config_.hidden_size;
   const int kv_dim = config_.kv_dim();
   const int head_dim = config_.head_dim();
@@ -513,13 +511,13 @@ int Qwen2Model::forward_cuda(int token, int position) {
   return result;
 }
 
-int Qwen2Model::forward_token(int token, int position) {
+int Qwen2Model::decode_token(int token, int position) {
   INFER_CHECK(token >= 0 && token < config_.vocab_size, "input token out of range");
   INFER_CHECK(position >= 0 && position < options_.max_sequence_length,
               "KV cache capacity exceeded");
-  ProfileRange range("qwen2.forward_token");
-  return options_.backend == Device::kCpu ? forward_cpu(token, position)
-                                          : forward_cuda(token, position);
+  ProfileRange range("qwen2.decode_token");
+  return options_.backend == Device::kCpu ? decode_token_cpu(token, position)
+                                          : decode_token_cuda(token, position);
 }
 
 std::vector<float> Qwen2Model::last_logits_host() const {
@@ -543,20 +541,6 @@ void Qwen2Model::reset() {
   has_prefilled_ = false;
 }
 
-PrefillMode Qwen2Model::effective_prefill_mode(size_t prompt_tokens) const {
-  INFER_CHECK(prompt_tokens > 0, "prompt must contain at least one token");
-  const bool supports_batched =
-      (options_.backend == Device::kCpu &&
-       options_.precision == Precision::kFloat32) ||
-      options_.backend == Device::kCuda;
-  if (options_.prefill_mode == PrefillMode::kAuto) {
-    return prompt_tokens >= 2 && supports_batched
-               ? PrefillMode::kBatched
-               : PrefillMode::kSerial;
-  }
-  return options_.prefill_mode;
-}
-
 int Qwen2Model::prefill(const std::vector<int>& prompt_tokens) {
   INFER_CHECK(!prompt_tokens.empty(), "prompt must contain at least one token");
   INFER_CHECK(position_ == 0 && !has_prefilled_,
@@ -567,26 +551,12 @@ int Qwen2Model::prefill(const std::vector<int>& prompt_tokens) {
     INFER_CHECK(token >= 0 && token < config_.vocab_size, "input token out of range");
   }
 
-  const PrefillMode mode = effective_prefill_mode(prompt_tokens.size());
   ProfileRange range("qwen2.prefill");
-  int next = 0;
-  if (mode == PrefillMode::kSerial) {
-    ProfileRange implementation("qwen2.prefill.serial");
-    for (const int token : prompt_tokens) {
-      next = forward_token(token, position_);
-      ++position_;
-    }
-  } else {
-    INFER_CHECK((options_.backend == Device::kCpu &&
-                 options_.precision == Precision::kFloat32) ||
-                    options_.backend == Device::kCuda,
-                "batched prefill supports CPU FP32 and CUDA FP32/W8A32");
-    ProfileRange implementation("qwen2.prefill.batched");
-    next = options_.backend == Device::kCpu
-               ? prefill_cpu_fp32(prompt_tokens)
-               : prefill_cuda(prompt_tokens);
-    position_ = static_cast<int>(prompt_tokens.size());
-  }
+  ProfileRange implementation("qwen2.prefill.matrixized");
+  const int next = options_.backend == Device::kCpu
+                       ? prefill_cpu_fp32(prompt_tokens)
+                       : prefill_cuda(prompt_tokens);
+  position_ = static_cast<int>(prompt_tokens.size());
   has_prefilled_ = true;
   return next;
 }
@@ -595,7 +565,7 @@ int Qwen2Model::decode_next(int token) {
   INFER_CHECK(has_prefilled_, "decode_next requires a successful prefill");
   INFER_CHECK(position_ < options_.max_sequence_length, "KV cache capacity exceeded");
   ProfileRange range("qwen2.decode_next");
-  const int next = forward_token(token, position_);
+  const int next = decode_token(token, position_);
   ++position_;
   return next;
 }
