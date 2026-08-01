@@ -404,6 +404,345 @@ __global__ void argmax_kernel(const float* values, int n, int* output) {
   if (threadIdx.x == 0) *output = best_index[0];
 }
 
+
+using BFloat16 = __nv_bfloat16;
+using BFloat16Pair = __nv_bfloat162;
+
+__global__ void embedding_bf16_kernel(const BFloat16* table, int token,
+                                      BFloat16* output, int hidden) {
+  if ((hidden & 1) == 0) {
+    const auto* source = reinterpret_cast<const BFloat16Pair*>(
+        table + static_cast<size_t>(token) * hidden);
+    auto* destination = reinterpret_cast<BFloat16Pair*>(output);
+    const int pairs = hidden / 2;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < pairs;
+         i += blockDim.x * gridDim.x) {
+      destination[i] = source[i];
+    }
+    return;
+  }
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < hidden;
+       i += blockDim.x * gridDim.x) {
+    output[i] = table[static_cast<size_t>(token) * hidden + i];
+  }
+}
+
+__global__ void embedding_batch_bf16_kernel(
+    const BFloat16* table, const int* tokens, BFloat16* output,
+    int token_count, int hidden) {
+  const int total = token_count * hidden;
+  if ((hidden & 1) == 0) {
+    const int pairs_per_row = hidden / 2;
+    const int total_pairs = token_count * pairs_per_row;
+    const auto* source = reinterpret_cast<const BFloat16Pair*>(table);
+    auto* destination = reinterpret_cast<BFloat16Pair*>(output);
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < total_pairs;
+         i += blockDim.x * gridDim.x) {
+      const int token_index = i / pairs_per_row;
+      const int pair = i % pairs_per_row;
+      destination[i] =
+          source[static_cast<size_t>(tokens[token_index]) * pairs_per_row + pair];
+    }
+    return;
+  }
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < total;
+       i += blockDim.x * gridDim.x) {
+    const int token_index = i / hidden;
+    const int column = i % hidden;
+    output[i] =
+        table[static_cast<size_t>(tokens[token_index]) * hidden + column];
+  }
+}
+
+__global__ void rms_norm_bf16_kernel(
+    const BFloat16* input, const BFloat16* weight, BFloat16* output,
+    int rows, int hidden, float epsilon) {
+  const int row = blockIdx.x;
+  if (row >= rows) return;
+  __shared__ float reduction[256];
+  const BFloat16* input_row = input + static_cast<size_t>(row) * hidden;
+  BFloat16* output_row = output + static_cast<size_t>(row) * hidden;
+  float sum = 0.0f;
+  if ((hidden & 1) == 0) {
+    const auto* input_pairs =
+        reinterpret_cast<const BFloat16Pair*>(input_row);
+    const int pair_count = hidden / 2;
+    for (int i = threadIdx.x; i < pair_count; i += blockDim.x) {
+      const float2 values = __bfloat1622float2(input_pairs[i]);
+      sum = fmaf(values.x, values.x, sum);
+      sum = fmaf(values.y, values.y, sum);
+    }
+  } else {
+    for (int i = threadIdx.x; i < hidden; i += blockDim.x) {
+      const float value = __bfloat162float(input_row[i]);
+      sum = fmaf(value, value, sum);
+    }
+  }
+  reduction[threadIdx.x] = sum;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      reduction[threadIdx.x] += reduction[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+  const float scale = rsqrtf(reduction[0] / hidden + epsilon);
+  if ((hidden & 1) == 0) {
+    const auto* input_pairs =
+        reinterpret_cast<const BFloat16Pair*>(input_row);
+    const auto* weight_pairs =
+        reinterpret_cast<const BFloat16Pair*>(weight);
+    auto* output_pairs = reinterpret_cast<BFloat16Pair*>(output_row);
+    const int pair_count = hidden / 2;
+    for (int i = threadIdx.x; i < pair_count; i += blockDim.x) {
+      const float2 values = __bfloat1622float2(input_pairs[i]);
+      const float2 weights = __bfloat1622float2(weight_pairs[i]);
+      output_pairs[i] = __floats2bfloat162_rn(
+          values.x * weights.x * scale, values.y * weights.y * scale);
+    }
+  } else {
+    for (int i = threadIdx.x; i < hidden; i += blockDim.x) {
+      output_row[i] = __float2bfloat16_rn(
+          __bfloat162float(input_row[i]) * __bfloat162float(weight[i]) * scale);
+    }
+  }
+}
+
+
+__global__ void rope_bf16_kernel(BFloat16* data, int token_count, int heads,
+                                 int head_dim, int start_position, float theta) {
+  const int head = blockIdx.x;
+  const int token = blockIdx.y;
+  const int i = threadIdx.x;
+  const int half = head_dim / 2;
+  if (token >= token_count || head >= heads || i >= half) return;
+  BFloat16* values =
+      data + (static_cast<size_t>(token) * heads + head) * head_dim;
+  const float frequency = powf(theta, -2.0f * i / head_dim);
+  float sine;
+  float cosine;
+  sincosf((start_position + token) * frequency, &sine, &cosine);
+  const float first = __bfloat162float(values[i]);
+  const float second = __bfloat162float(values[i + half]);
+  values[i] = __float2bfloat16_rn(first * cosine - second * sine);
+  values[i + half] =
+      __float2bfloat16_rn(second * cosine + first * sine);
+}
+
+__global__ void store_kv_bf16_kernel(
+    const BFloat16* key, const BFloat16* value, BFloat16* key_cache,
+    BFloat16* value_cache, int token_count, int kv_heads, int head_dim,
+    int start_position, int max_sequence) {
+  const int total = token_count * kv_heads * head_dim;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < total;
+       i += blockDim.x * gridDim.x) {
+    const int dim = i % head_dim;
+    const int token_head = i / head_dim;
+    const int head = token_head % kv_heads;
+    const int token = token_head / kv_heads;
+    const size_t cache_offset =
+        (static_cast<size_t>(head) * max_sequence + start_position + token) *
+            head_dim +
+        dim;
+    key_cache[cache_offset] = key[i];
+    value_cache[cache_offset] = value[i];
+  }
+}
+
+__global__ void attention_decode_bf16_kernel(
+    const BFloat16* q, const BFloat16* key_cache,
+    const BFloat16* value_cache, BFloat16* output, int num_heads,
+    int num_kv_heads, int head_dim, int sequence_length, int max_sequence) {
+  extern __shared__ float scores[];
+  __shared__ float maximum;
+  __shared__ float denominator;
+  const int head = blockIdx.x;
+  if (head >= num_heads) return;
+  const int kv_head = head / (num_heads / num_kv_heads);
+  const BFloat16* query = q + static_cast<size_t>(head) * head_dim;
+  const float scale = rsqrtf(static_cast<float>(head_dim));
+  for (int position = threadIdx.x; position < sequence_length;
+       position += blockDim.x) {
+    const BFloat16* key =
+        key_cache +
+        (static_cast<size_t>(kv_head) * max_sequence + position) * head_dim;
+    float dot = 0.0f;
+    for (int dimension = 0; dimension < head_dim; ++dimension) {
+      dot = fmaf(__bfloat162float(query[dimension]),
+                 __bfloat162float(key[dimension]), dot);
+    }
+    scores[position] = dot * scale;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float value = -FLT_MAX;
+    for (int position = 0; position < sequence_length; ++position) {
+      value = fmaxf(value, scores[position]);
+    }
+    maximum = value;
+  }
+  __syncthreads();
+  for (int position = threadIdx.x; position < sequence_length;
+       position += blockDim.x) {
+    scores[position] = expf(scores[position] - maximum);
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float sum = 0.0f;
+    for (int position = 0; position < sequence_length; ++position) {
+      sum += scores[position];
+    }
+    denominator = sum;
+  }
+  __syncthreads();
+  for (int dimension = threadIdx.x; dimension < head_dim;
+       dimension += blockDim.x) {
+    float sum = 0.0f;
+    for (int position = 0; position < sequence_length; ++position) {
+      const BFloat16* value =
+          value_cache +
+          (static_cast<size_t>(kv_head) * max_sequence + position) * head_dim;
+      sum = fmaf(scores[position] / denominator,
+                 __bfloat162float(value[dimension]), sum);
+    }
+    output[static_cast<size_t>(head) * head_dim + dimension] =
+        __float2bfloat16_rn(sum);
+  }
+}
+
+
+__global__ void attention_prefill_bf16_kernel(
+    const BFloat16* q, const BFloat16* key_cache,
+    const BFloat16* value_cache, BFloat16* output, int token_count,
+    int num_heads, int num_kv_heads, int head_dim, int max_sequence) {
+  extern __shared__ float scores[];
+  __shared__ float maximum;
+  __shared__ float denominator;
+  const int head = blockIdx.x;
+  const int token = blockIdx.y;
+  if (token >= token_count || head >= num_heads) return;
+  const int sequence_length = token + 1;
+  const int kv_head = head / (num_heads / num_kv_heads);
+  const BFloat16* query =
+      q + (static_cast<size_t>(token) * num_heads + head) * head_dim;
+  const float scale = rsqrtf(static_cast<float>(head_dim));
+  for (int position = threadIdx.x; position < sequence_length;
+       position += blockDim.x) {
+    const BFloat16* key =
+        key_cache +
+        (static_cast<size_t>(kv_head) * max_sequence + position) * head_dim;
+    float dot = 0.0f;
+    for (int dimension = 0; dimension < head_dim; ++dimension) {
+      dot = fmaf(__bfloat162float(query[dimension]),
+                 __bfloat162float(key[dimension]), dot);
+    }
+    scores[position] = dot * scale;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float value = -FLT_MAX;
+    for (int position = 0; position < sequence_length; ++position) {
+      value = fmaxf(value, scores[position]);
+    }
+    maximum = value;
+  }
+  __syncthreads();
+  for (int position = threadIdx.x; position < sequence_length;
+       position += blockDim.x) {
+    scores[position] = expf(scores[position] - maximum);
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float sum = 0.0f;
+    for (int position = 0; position < sequence_length; ++position) {
+      sum += scores[position];
+    }
+    denominator = sum;
+  }
+  __syncthreads();
+  for (int dimension = threadIdx.x; dimension < head_dim;
+       dimension += blockDim.x) {
+    float sum = 0.0f;
+    for (int position = 0; position < sequence_length; ++position) {
+      const BFloat16* value =
+          value_cache +
+          (static_cast<size_t>(kv_head) * max_sequence + position) * head_dim;
+      sum = fmaf(scores[position] / denominator,
+                 __bfloat162float(value[dimension]), sum);
+    }
+    output[(static_cast<size_t>(token) * num_heads + head) * head_dim +
+           dimension] = __float2bfloat16_rn(sum);
+  }
+}
+
+__global__ void add_bf16_kernel(BFloat16* x, const BFloat16* residual, int n) {
+  const int pair_count = n / 2;
+  auto* x_pairs = reinterpret_cast<BFloat16Pair*>(x);
+  const auto* residual_pairs =
+      reinterpret_cast<const BFloat16Pair*>(residual);
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < pair_count;
+       i += blockDim.x * gridDim.x) {
+    const float2 lhs = __bfloat1622float2(x_pairs[i]);
+    const float2 rhs = __bfloat1622float2(residual_pairs[i]);
+    x_pairs[i] = __floats2bfloat162_rn(lhs.x + rhs.x, lhs.y + rhs.y);
+  }
+  if ((n & 1) != 0 && blockIdx.x == 0 && threadIdx.x == 0) {
+    x[n - 1] = __float2bfloat16_rn(
+        __bfloat162float(x[n - 1]) + __bfloat162float(residual[n - 1]));
+  }
+}
+
+__global__ void silu_mul_bf16_kernel(
+    const BFloat16* gate, const BFloat16* up, BFloat16* output, int n) {
+  const int pair_count = n / 2;
+  const auto* gate_pairs = reinterpret_cast<const BFloat16Pair*>(gate);
+  const auto* up_pairs = reinterpret_cast<const BFloat16Pair*>(up);
+  auto* output_pairs = reinterpret_cast<BFloat16Pair*>(output);
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < pair_count;
+       i += blockDim.x * gridDim.x) {
+    const float2 gate_values = __bfloat1622float2(gate_pairs[i]);
+    const float2 up_values = __bfloat1622float2(up_pairs[i]);
+    const float first =
+        (gate_values.x / (1.0f + expf(-gate_values.x))) * up_values.x;
+    const float second =
+        (gate_values.y / (1.0f + expf(-gate_values.y))) * up_values.y;
+    output_pairs[i] = __floats2bfloat162_rn(first, second);
+  }
+  if ((n & 1) != 0 && blockIdx.x == 0 && threadIdx.x == 0) {
+    const float gate_value = __bfloat162float(gate[n - 1]);
+    output[n - 1] = __float2bfloat16_rn(
+        (gate_value / (1.0f + expf(-gate_value))) *
+        __bfloat162float(up[n - 1]));
+  }
+}
+
+__global__ void argmax_bf16_kernel(
+    const BFloat16* values, int n, int* output) {
+  __shared__ float best_value[256];
+  __shared__ int best_index[256];
+  float value = -FLT_MAX;
+  int index = 0;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    const float candidate = __bfloat162float(values[i]);
+    if (candidate > value) {
+      value = candidate;
+      index = i;
+    }
+  }
+  best_value[threadIdx.x] = value;
+  best_index[threadIdx.x] = index;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride &&
+        best_value[threadIdx.x + stride] > best_value[threadIdx.x]) {
+      best_value[threadIdx.x] = best_value[threadIdx.x + stride];
+      best_index[threadIdx.x] = best_index[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) *output = best_index[0];
+}
+
 int blocks_for(int n) { return std::min(65535, (n + 255) / 256); }
 
 }  // namespace
@@ -589,6 +928,129 @@ void silu_mul(const float* gate, const float* up, float* output, int n,
 
 void argmax(const float* values, int n, int* output, cudaStream_t stream) {
   argmax_kernel<<<1, 256, 0, stream>>>(values, n, output);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+
+void embedding_bf16(const BFloat16* table, int token, BFloat16* output,
+                    int hidden_size, cudaStream_t stream) {
+  embedding_bf16_kernel<<<blocks_for(hidden_size), 256, 0, stream>>>(
+      table, token, output, hidden_size);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void embedding_batch_bf16(const BFloat16* table, const int* tokens,
+                          BFloat16* output, int token_count, int hidden_size,
+                          cudaStream_t stream) {
+  const int total = token_count * hidden_size;
+  embedding_batch_bf16_kernel<<<blocks_for(total), 256, 0, stream>>>(
+      table, tokens, output, token_count, hidden_size);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void rms_norm_bf16(const BFloat16* input, const BFloat16* weight,
+                   BFloat16* output, int n, float epsilon,
+                   cudaStream_t stream) {
+  rms_norm_bf16_kernel<<<1, 256, 0, stream>>>(
+      input, weight, output, 1, n, epsilon);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void rms_norm_batch_bf16(const BFloat16* input, const BFloat16* weight,
+                         BFloat16* output, int token_count, int hidden_size,
+                         float epsilon, cudaStream_t stream) {
+  rms_norm_bf16_kernel<<<token_count, 256, 0, stream>>>(
+      input, weight, output, token_count, hidden_size, epsilon);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void rope_bf16(BFloat16* q, BFloat16* k, int num_heads, int num_kv_heads,
+               int head_dim, int position, float theta,
+               cudaStream_t stream) {
+  const dim3 q_grid(num_heads, 1);
+  const dim3 k_grid(num_kv_heads, 1);
+  rope_bf16_kernel<<<q_grid, head_dim / 2, 0, stream>>>(
+      q, 1, num_heads, head_dim, position, theta);
+  rope_bf16_kernel<<<k_grid, head_dim / 2, 0, stream>>>(
+      k, 1, num_kv_heads, head_dim, position, theta);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void rope_batch_bf16(BFloat16* q, BFloat16* k, int token_count,
+                     int num_heads, int num_kv_heads, int head_dim,
+                     int start_position, float theta, cudaStream_t stream) {
+  const dim3 q_grid(num_heads, token_count);
+  const dim3 k_grid(num_kv_heads, token_count);
+  rope_bf16_kernel<<<q_grid, head_dim / 2, 0, stream>>>(
+      q, token_count, num_heads, head_dim, start_position, theta);
+  rope_bf16_kernel<<<k_grid, head_dim / 2, 0, stream>>>(
+      k, token_count, num_kv_heads, head_dim, start_position, theta);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void store_kv_bf16(const BFloat16* key, const BFloat16* value,
+                   BFloat16* key_cache, BFloat16* value_cache, int kv_heads,
+                   int head_dim, int position, int max_sequence_length,
+                   cudaStream_t stream) {
+  const int total = kv_heads * head_dim;
+  store_kv_bf16_kernel<<<blocks_for(total), 256, 0, stream>>>(
+      key, value, key_cache, value_cache, 1, kv_heads, head_dim, position,
+      max_sequence_length);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void store_kv_batch_bf16(const BFloat16* key, const BFloat16* value,
+                         BFloat16* key_cache, BFloat16* value_cache,
+                         int token_count, int kv_heads, int head_dim,
+                         int max_sequence_length, cudaStream_t stream) {
+  const int total = token_count * kv_heads * head_dim;
+  store_kv_bf16_kernel<<<blocks_for(total), 256, 0, stream>>>(
+      key, value, key_cache, value_cache, token_count, kv_heads, head_dim, 0,
+      max_sequence_length);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void attention_decode_bf16(
+    const BFloat16* q, const BFloat16* key_cache,
+    const BFloat16* value_cache, BFloat16* output, int num_heads,
+    int num_kv_heads, int head_dim, int sequence_length,
+    int max_sequence_length, cudaStream_t stream) {
+  attention_decode_bf16_kernel<<<
+      num_heads, 128, sequence_length * sizeof(float), stream>>>(
+      q, key_cache, value_cache, output, num_heads, num_kv_heads, head_dim,
+      sequence_length, max_sequence_length);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void attention_prefill_bf16(
+    const BFloat16* q, const BFloat16* key_cache,
+    const BFloat16* value_cache, BFloat16* output, int token_count,
+    int num_heads, int num_kv_heads, int head_dim, int max_sequence_length,
+    cudaStream_t stream) {
+  const dim3 grid(num_heads, token_count);
+  attention_prefill_bf16_kernel<<<
+      grid, 128, token_count * sizeof(float), stream>>>(
+      q, key_cache, value_cache, output, token_count, num_heads, num_kv_heads,
+      head_dim, max_sequence_length);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void add_inplace_bf16(BFloat16* x, const BFloat16* residual, int n,
+                      cudaStream_t stream) {
+  add_bf16_kernel<<<blocks_for(n), 256, 0, stream>>>(x, residual, n);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void silu_mul_bf16(const BFloat16* gate, const BFloat16* up,
+                   BFloat16* output, int n, cudaStream_t stream) {
+  silu_mul_bf16_kernel<<<blocks_for(n), 256, 0, stream>>>(
+      gate, up, output, n);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void argmax_bf16(const BFloat16* values, int n, int* output,
+                 cudaStream_t stream) {
+  argmax_bf16_kernel<<<1, 256, 0, stream>>>(values, n, output);
   INFER_CUDA_CHECK(cudaGetLastError());
 }
 

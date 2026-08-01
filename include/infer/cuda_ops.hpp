@@ -3,6 +3,7 @@
 #include "infer/common.hpp"
 
 #include <cublas_v2.h>
+#include <cuda_bf16.h>
 
 namespace infer::cuda {
 
@@ -71,5 +72,54 @@ void add_inplace(float* x, const float* residual, int n, cudaStream_t stream);
 void silu_mul(const float* gate, const float* up, float* output, int n,
               cudaStream_t stream);
 void argmax(const float* values, int n, int* output, cudaStream_t stream);
+
+
+void embedding_bf16(const __nv_bfloat16* table, int token,
+                    __nv_bfloat16* output, int hidden_size,
+                    cudaStream_t stream);
+void embedding_batch_bf16(const __nv_bfloat16* table, const int* tokens,
+                          __nv_bfloat16* output, int token_count,
+                          int hidden_size, cudaStream_t stream);
+void rms_norm_bf16(const __nv_bfloat16* input, const __nv_bfloat16* weight,
+                   __nv_bfloat16* output, int n, float epsilon,
+                   cudaStream_t stream);
+void rms_norm_batch_bf16(const __nv_bfloat16* input,
+                         const __nv_bfloat16* weight,
+                         __nv_bfloat16* output, int token_count,
+                         int hidden_size, float epsilon, cudaStream_t stream);
+void rope_bf16(__nv_bfloat16* q, __nv_bfloat16* k, int num_heads,
+               int num_kv_heads, int head_dim, int position, float theta,
+               cudaStream_t stream);
+void rope_batch_bf16(__nv_bfloat16* q, __nv_bfloat16* k, int token_count,
+                     int num_heads, int num_kv_heads, int head_dim,
+                     int start_position, float theta, cudaStream_t stream);
+void store_kv_bf16(const __nv_bfloat16* key, const __nv_bfloat16* value,
+                   __nv_bfloat16* key_cache, __nv_bfloat16* value_cache,
+                   int kv_heads, int head_dim, int position,
+                   int max_sequence_length, cudaStream_t stream);
+void store_kv_batch_bf16(const __nv_bfloat16* key,
+                         const __nv_bfloat16* value,
+                         __nv_bfloat16* key_cache,
+                         __nv_bfloat16* value_cache, int token_count,
+                         int kv_heads, int head_dim, int max_sequence_length,
+                         cudaStream_t stream);
+void attention_decode_bf16(const __nv_bfloat16* q,
+                           const __nv_bfloat16* key_cache,
+                           const __nv_bfloat16* value_cache,
+                           __nv_bfloat16* output, int num_heads,
+                           int num_kv_heads, int head_dim, int sequence_length,
+                           int max_sequence_length, cudaStream_t stream);
+void attention_prefill_bf16(const __nv_bfloat16* q,
+                            const __nv_bfloat16* key_cache,
+                            const __nv_bfloat16* value_cache,
+                            __nv_bfloat16* output, int token_count,
+                            int num_heads, int num_kv_heads, int head_dim,
+                            int max_sequence_length, cudaStream_t stream);
+void add_inplace_bf16(__nv_bfloat16* x, const __nv_bfloat16* residual,
+                      int n, cudaStream_t stream);
+void silu_mul_bf16(const __nv_bfloat16* gate, const __nv_bfloat16* up,
+                   __nv_bfloat16* output, int n, cudaStream_t stream);
+void argmax_bf16(const __nv_bfloat16* values, int n, int* output,
+                 cudaStream_t stream);
 
 }  // namespace infer::cuda
