@@ -316,7 +316,7 @@ TEST(Qwen2MatrixizedPrefill, CudaCublasMatchesCustomKernel) {
   auto custom_options = cpu_options(64);
   custom_options.backend = infer::Device::kCuda;
   auto cublas_options = custom_options;
-  cublas_options.use_cublas_gemv = true;
+  cublas_options.linear_kernel = infer::LinearKernel::kCublas;
   infer::Qwen2Model custom(tiny.path(), custom_options);
   infer::Qwen2Model cublas(tiny.path(), cublas_options);
   const auto prompt = prompt_tokens(32);

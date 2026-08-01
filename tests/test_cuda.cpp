@@ -608,3 +608,114 @@ TEST(CudaBFloat16, RopeKvAndAttentionMatchFp32) {
     }
   }
 }
+
+namespace {
+
+std::vector<float> linear_reference(const std::vector<float>& weight,
+                                    const std::vector<float>* bias,
+                                    const std::vector<float>& input, int tokens,
+                                    int out_features, int in_features) {
+  std::vector<float> output(static_cast<size_t>(tokens) * out_features);
+  for (int token = 0; token < tokens; ++token) {
+    for (int row = 0; row < out_features; ++row) {
+      float sum = bias ? (*bias)[row] : 0.0f;
+      for (int column = 0; column < in_features; ++column) {
+        sum += weight[static_cast<size_t>(row) * in_features + column] *
+               input[static_cast<size_t>(token) * in_features + column];
+      }
+      output[static_cast<size_t>(token) * out_features + row] = sum;
+    }
+  }
+  return output;
+}
+
+void expect_linear_near(const std::vector<float>& actual,
+                        const std::vector<float>& expected) {
+  ASSERT_EQ(actual.size(), expected.size());
+  for (size_t index = 0; index < actual.size(); ++index) {
+    const float tolerance =
+        std::max(0.004f, std::abs(expected[index]) * 0.008f);
+    EXPECT_NEAR(actual[index], expected[index], tolerance) << "index " << index;
+  }
+}
+
+void check_bf16_linear_case(infer::cuda::Context& context, int tokens,
+                            int out_features, int in_features,
+                            bool with_bias) {
+  std::vector<float> weight(static_cast<size_t>(out_features) * in_features);
+  std::vector<float> input(static_cast<size_t>(tokens) * in_features);
+  std::vector<float> bias(out_features);
+  for (size_t index = 0; index < weight.size(); ++index) {
+    weight[index] =
+        (static_cast<int>(index % 17) - 8) * 0.015625f;
+  }
+  for (size_t index = 0; index < input.size(); ++index) {
+    input[index] = (static_cast<int>(index % 13) - 6) * 0.03125f;
+  }
+  for (int row = 0; row < out_features; ++row) {
+    bias[row] = (row % 5 - 2) * 0.0625f;
+  }
+  const auto rounded_weight = decode_bf16(encode_bf16(weight));
+  const auto rounded_input = decode_bf16(encode_bf16(input));
+  const auto rounded_bias = decode_bf16(encode_bf16(bias));
+  const auto expected = linear_reference(
+      rounded_weight, with_bias ? &rounded_bias : nullptr, rounded_input,
+      tokens, out_features, in_features);
+
+  infer::Buffer d_weight(weight.size() * sizeof(uint16_t),
+                         infer::Device::kCuda);
+  infer::Buffer d_input(input.size() * sizeof(uint16_t), infer::Device::kCuda);
+  infer::Buffer d_bias(bias.size() * sizeof(uint16_t), infer::Device::kCuda);
+  infer::Buffer d_custom(static_cast<size_t>(tokens) * out_features *
+                             sizeof(uint16_t),
+                         infer::Device::kCuda);
+  infer::Buffer d_cublas(static_cast<size_t>(tokens) * out_features *
+                             sizeof(uint16_t),
+                         infer::Device::kCuda);
+  upload_bf16(d_weight, weight, context);
+  upload_bf16(d_input, input, context);
+  upload_bf16(d_bias, bias, context);
+  const auto* bias_pointer = with_bias ? bf16_data(d_bias) : nullptr;
+
+  infer::cuda::gemv_bf16(
+      bf16_data(d_weight), bias_pointer, bf16_data(d_input),
+      bf16_data(d_custom), out_features, in_features, context.stream());
+  infer::cuda::gemv_bf16_cublas(
+      context.cublas(), bf16_data(d_weight), bias_pointer, bf16_data(d_input),
+      bf16_data(d_cublas), out_features, in_features, context.stream());
+  const auto custom_gemv = read_bf16(d_custom, out_features, context);
+  const auto cublas_gemv = read_bf16(d_cublas, out_features, context);
+  expect_linear_near(
+      custom_gemv,
+      std::vector<float>(expected.begin(), expected.begin() + out_features));
+  expect_linear_near(
+      cublas_gemv,
+      std::vector<float>(expected.begin(), expected.begin() + out_features));
+  expect_linear_near(custom_gemv, cublas_gemv);
+
+  infer::cuda::gemm_bf16(
+      bf16_data(d_weight), bias_pointer, bf16_data(d_input),
+      bf16_data(d_custom), tokens, out_features, in_features,
+      context.stream());
+  infer::cuda::gemm_bf16_cublas(
+      context.cublas(), bf16_data(d_weight), bias_pointer, bf16_data(d_input),
+      bf16_data(d_cublas), tokens, out_features, in_features,
+      context.stream());
+  const auto custom_gemm =
+      read_bf16(d_custom, static_cast<size_t>(tokens) * out_features, context);
+  const auto cublas_gemm =
+      read_bf16(d_cublas, static_cast<size_t>(tokens) * out_features, context);
+  expect_linear_near(custom_gemm, expected);
+  expect_linear_near(cublas_gemm, expected);
+  expect_linear_near(custom_gemm, cublas_gemm);
+}
+
+}  // namespace
+
+TEST(CudaBFloat16, LinearCustomAndCublasMatchFp32Reference) {
+  if (!cuda_available()) GTEST_SKIP();
+  infer::cuda::Context context;
+  check_bf16_linear_case(context, 3, 11, 14, true);
+  check_bf16_linear_case(context, 2, 5, 7, true);
+  check_bf16_linear_case(context, 3, 23, 14, false);
+}

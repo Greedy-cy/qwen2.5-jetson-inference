@@ -74,6 +74,25 @@ void silu_mul(const float* gate, const float* up, float* output, int n,
 void argmax(const float* values, int n, int* output, cudaStream_t stream);
 
 
+
+void gemv_bf16(const __nv_bfloat16* weight, const __nv_bfloat16* bias,
+                const __nv_bfloat16* input, __nv_bfloat16* output,
+                int out_features, int in_features, cudaStream_t stream);
+void gemv_bf16_cublas(cublasHandle_t handle, const __nv_bfloat16* weight,
+                       const __nv_bfloat16* bias,
+                       const __nv_bfloat16* input, __nv_bfloat16* output,
+                       int out_features, int in_features,
+                       cudaStream_t stream);
+void gemm_bf16(const __nv_bfloat16* weight, const __nv_bfloat16* bias,
+                const __nv_bfloat16* input, __nv_bfloat16* output,
+                int tokens, int out_features, int in_features,
+                cudaStream_t stream);
+void gemm_bf16_cublas(cublasHandle_t handle, const __nv_bfloat16* weight,
+                       const __nv_bfloat16* bias,
+                       const __nv_bfloat16* input, __nv_bfloat16* output,
+                       int tokens, int out_features, int in_features,
+                       cudaStream_t stream);
+
 void embedding_bf16(const __nv_bfloat16* table, int token,
                     __nv_bfloat16* output, int hidden_size,
                     cudaStream_t stream);

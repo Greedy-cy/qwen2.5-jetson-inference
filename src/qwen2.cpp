@@ -178,7 +178,7 @@ void Qwen2Model::linear(std::string_view weight_name, std::string_view bias_name
     return;
   }
   if (rec.dtype == DType::kFloat32) {
-    if (prefer_cublas || options_.use_cublas_gemv) {
+    if (prefer_cublas || options_.linear_kernel == LinearKernel::kCublas) {
       cuda::gemv_fp32_cublas(cuda_context_->cublas(),
                              static_cast<const float*>(weight(weight_name)), bias,
                              input, output, out_features, in_features,
@@ -218,7 +218,7 @@ void Qwen2Model::linear_cuda_batch(
               "batched CUDA linear requires CUDA backend");
   const auto& rec = archive_.record(weight_name);
   if (rec.dtype == DType::kFloat32) {
-    if (options_.use_cublas_gemv) {
+    if (options_.linear_kernel == LinearKernel::kCublas) {
       cuda::gemm_fp32_cublas(
           cuda_context_->cublas(),
           static_cast<const float*>(weight(weight_name)), input, output,

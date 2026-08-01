@@ -743,6 +743,99 @@ __global__ void argmax_bf16_kernel(
   if (threadIdx.x == 0) *output = best_index[0];
 }
 
+
+__global__ void gemv_bf16_kernel(
+    const BFloat16* weight, const BFloat16* bias, const BFloat16* input,
+    BFloat16* output, int out_features, int in_features) {
+  const int row = blockIdx.x;
+  if (row >= out_features) return;
+  __shared__ float reduction[256];
+  float sum = 0.0f;
+  const BFloat16* row_weight =
+      weight + static_cast<size_t>(row) * in_features;
+  if ((in_features & 1) == 0) {
+    const auto* weight_pairs =
+        reinterpret_cast<const BFloat16Pair*>(row_weight);
+    const auto* input_pairs =
+        reinterpret_cast<const BFloat16Pair*>(input);
+    const int pair_count = in_features / 2;
+    for (int pair = threadIdx.x; pair < pair_count; pair += blockDim.x) {
+      const float2 weights = __bfloat1622float2(weight_pairs[pair]);
+      const float2 values = __bfloat1622float2(input_pairs[pair]);
+      sum = fmaf(weights.x, values.x, sum);
+      sum = fmaf(weights.y, values.y, sum);
+    }
+  } else {
+    for (int column = threadIdx.x; column < in_features;
+         column += blockDim.x) {
+      sum = fmaf(__bfloat162float(row_weight[column]),
+                 __bfloat162float(input[column]), sum);
+    }
+  }
+  reduction[threadIdx.x] = sum;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      reduction[threadIdx.x] += reduction[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    const float bias_value = bias ? __bfloat162float(bias[row]) : 0.0f;
+    output[row] = __float2bfloat16_rn(reduction[0] + bias_value);
+  }
+}
+
+__global__ void gemm_bf16_tiled_kernel(
+    const BFloat16* weight, const BFloat16* bias, const BFloat16* input,
+    BFloat16* output, int tokens, int out_features, int in_features) {
+  constexpr int tile = 16;
+  __shared__ float input_tile[tile][tile];
+  __shared__ float weight_tile[tile][tile];
+  const int token = blockIdx.y * tile + threadIdx.y;
+  const int row = blockIdx.x * tile + threadIdx.x;
+  float sum = 0.0f;
+  for (int begin = 0; begin < in_features; begin += tile) {
+    const int input_column = begin + threadIdx.x;
+    input_tile[threadIdx.y][threadIdx.x] =
+        token < tokens && input_column < in_features
+            ? __bfloat162float(
+                  input[static_cast<size_t>(token) * in_features +
+                        input_column])
+            : 0.0f;
+    const int weight_column = begin + threadIdx.y;
+    weight_tile[threadIdx.x][threadIdx.y] =
+        row < out_features && weight_column < in_features
+            ? __bfloat162float(
+                  weight[static_cast<size_t>(row) * in_features +
+                         weight_column])
+            : 0.0f;
+    __syncthreads();
+#pragma unroll
+    for (int index = 0; index < tile; ++index) {
+      sum = fmaf(input_tile[threadIdx.y][index],
+                 weight_tile[threadIdx.x][index], sum);
+    }
+    __syncthreads();
+  }
+  if (token < tokens && row < out_features) {
+    const float bias_value = bias ? __bfloat162float(bias[row]) : 0.0f;
+    output[static_cast<size_t>(token) * out_features + row] =
+        __float2bfloat16_rn(sum + bias_value);
+  }
+}
+
+__global__ void add_bias_batch_bf16_kernel(
+    BFloat16* output, const BFloat16* bias, int tokens, int out_features) {
+  const int total = tokens * out_features;
+  for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < total;
+       index += blockDim.x * gridDim.x) {
+    output[index] = __float2bfloat16_rn(
+        __bfloat162float(output[index]) +
+        __bfloat162float(bias[index % out_features]));
+  }
+}
+
 int blocks_for(int n) { return std::min(65535, (n + 255) / 256); }
 
 }  // namespace
@@ -1052,6 +1145,66 @@ void argmax_bf16(const BFloat16* values, int n, int* output,
                  cudaStream_t stream) {
   argmax_bf16_kernel<<<1, 256, 0, stream>>>(values, n, output);
   INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+
+void gemv_bf16(const BFloat16* weight, const BFloat16* bias,
+                const BFloat16* input, BFloat16* output, int out_features,
+                int in_features, cudaStream_t stream) {
+  gemv_bf16_kernel<<<out_features, 256, 0, stream>>>(
+      weight, bias, input, output, out_features, in_features);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void gemv_bf16_cublas(cublasHandle_t handle, const BFloat16* weight,
+                       const BFloat16* bias, const BFloat16* input,
+                       BFloat16* output, int out_features, int in_features,
+                       cudaStream_t stream) {
+  const float alpha = 1.0f;
+  const float beta = 0.0f;
+  cublas_check(
+      cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, out_features, 1,
+                   in_features, &alpha, weight, CUDA_R_16BF, in_features,
+                   input, CUDA_R_16BF, in_features, &beta, output, CUDA_R_16BF,
+                   out_features, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
+      "cublasGemmEx BF16 GEMV");
+  if (bias) {
+    add_bias_batch_bf16_kernel<<<blocks_for(out_features), 256, 0, stream>>>(
+        output, bias, 1, out_features);
+    INFER_CUDA_CHECK(cudaGetLastError());
+  }
+}
+
+void gemm_bf16(const BFloat16* weight, const BFloat16* bias,
+                const BFloat16* input, BFloat16* output, int tokens,
+                int out_features, int in_features, cudaStream_t stream) {
+  constexpr int tile = 16;
+  const dim3 block(tile, tile);
+  const dim3 grid((out_features + tile - 1) / tile,
+                  (tokens + tile - 1) / tile);
+  gemm_bf16_tiled_kernel<<<grid, block, 0, stream>>>(
+      weight, bias, input, output, tokens, out_features, in_features);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void gemm_bf16_cublas(cublasHandle_t handle, const BFloat16* weight,
+                       const BFloat16* bias, const BFloat16* input,
+                       BFloat16* output, int tokens, int out_features,
+                       int in_features, cudaStream_t stream) {
+  const float alpha = 1.0f;
+  const float beta = 0.0f;
+  cublas_check(
+      cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, out_features, tokens,
+                   in_features, &alpha, weight, CUDA_R_16BF, in_features,
+                   input, CUDA_R_16BF, in_features, &beta, output, CUDA_R_16BF,
+                   out_features, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
+      "cublasGemmEx BF16 GEMM");
+  if (bias) {
+    const int total = tokens * out_features;
+    add_bias_batch_bf16_kernel<<<blocks_for(total), 256, 0, stream>>>(
+        output, bias, tokens, out_features);
+    INFER_CUDA_CHECK(cudaGetLastError());
+  }
 }
 
 }  // namespace infer::cuda

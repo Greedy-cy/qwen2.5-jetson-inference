@@ -7,11 +7,17 @@
 
 namespace infer {
 
+enum class LinearKernel { kCustom, kCublas };
+
+inline const char* to_string(LinearKernel value) {
+  return value == LinearKernel::kCustom ? "custom" : "cublas";
+}
+
 struct RuntimeOptions {
   Device backend{Device::kCuda};
   Precision precision{Precision::kFloat32};
   int max_sequence_length{2048};
-  bool use_cublas_gemv{false};
+  LinearKernel linear_kernel{LinearKernel::kCustom};
 };
 
 struct GenerationStats {

@@ -12,6 +12,7 @@
 namespace {
 
 using infer::Device;
+using infer::LinearKernel;
 using infer::Precision;
 
 class Arguments {
@@ -43,7 +44,8 @@ void usage() {
       "Usage:\n"
       "  llm_infer generate --model DIR --prompt TEXT [--backend cpu|cuda]\n"
       "                     [--precision fp32|w8a32|w16a16] [--max-new-tokens 128]\n"
-      "                     [--max-seq-len 2048] [--system TEXT] [--raw] [--cublas]\n"
+      "                     [--max-seq-len 2048] [--system TEXT] [--raw]\n"
+      "                     [--linear-kernel custom|cublas] [--cublas]\n"
       "  llm_infer benchmark --model DIR (--prompt TEXT | --token-ids CSV)\n"
       "                      [--warmup 5] [--repeat 20] [--json FILE]\n"
       "                      [--telemetry-markers] [other generation options]\n"
@@ -56,6 +58,12 @@ Device parse_device(const std::string& text) {
   if (text == "cpu") return Device::kCpu;
   if (text == "cuda") return Device::kCuda;
   throw infer::Error("backend must be cpu or cuda");
+}
+
+LinearKernel parse_linear_kernel(const std::string& text) {
+  if (text == "custom") return LinearKernel::kCustom;
+  if (text == "cublas") return LinearKernel::kCublas;
+  throw infer::Error("linear kernel must be custom or cublas");
 }
 
 Precision parse_precision(const std::string& text) {
@@ -71,7 +79,15 @@ infer::RuntimeOptions runtime_options(const Arguments& args) {
   options.backend = parse_device(args.get("--backend", "cuda"));
   options.precision = parse_precision(args.get("--precision", "fp32"));
   options.max_sequence_length = args.get_int("--max-seq-len", 2048);
-  options.use_cublas_gemv = args.has("--cublas");
+  const std::string linear_kernel = args.get("--linear-kernel");
+  INFER_CHECK(linear_kernel.empty() || !args.has("--cublas"),
+              "--linear-kernel and legacy --cublas cannot be used together");
+  if (!linear_kernel.empty()) {
+    options.linear_kernel = parse_linear_kernel(linear_kernel);
+  } else if (args.has("--cublas") ||
+             options.precision == Precision::kW16A16) {
+    options.linear_kernel = LinearKernel::kCublas;
+  }
   return options;
 }
 
@@ -304,7 +320,8 @@ void benchmark(const Arguments& args) {
         {"early_stop", false},
         {"prefill_implementation", "matrixized"},
         {"max_sequence_length", options.max_sequence_length},
-        {"use_cublas_gemv", options.use_cublas_gemv},
+        {"linear_kernel", infer::to_string(options.linear_kernel)},
+        {"use_cublas_gemv", options.linear_kernel == LinearKernel::kCublas},
         {"warmup", warmup},
         {"repeat", repeat},
         {"threading",
