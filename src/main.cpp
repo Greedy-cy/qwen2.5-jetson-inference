@@ -42,7 +42,7 @@ void usage() {
   std::cout <<
       "Qwen2.5 C++/CUDA inference\n\n"
       "Usage:\n"
-      "  llm_infer generate --model DIR --prompt TEXT [--backend cpu|cuda]\n"
+      "  llm_infer generate --model DIR (--prompt TEXT | --token-ids CSV) [--backend cpu|cuda]\n"
       "                     [--precision fp32|w8a32|w16a16] [--max-new-tokens 128]\n"
       "                     [--max-seq-len 2048] [--system TEXT] [--raw]\n"
       "                     [--linear-kernel custom|cublas] [--cublas]\n"
@@ -211,7 +211,12 @@ void generate(const Arguments& args) {
   const std::filesystem::path directory = args.get("--model");
   if (directory.empty()) throw infer::Error("--model is required");
   infer::QwenTokenizer tokenizer(directory / "tokenizer.json");
-  const auto prompt = make_prompt(args, tokenizer);
+  const auto token_ids = args.get("--token-ids");
+  if (!token_ids.empty() && args.has("--prompt")) {
+    throw infer::Error("--prompt and --token-ids are mutually exclusive");
+  }
+  const auto prompt = token_ids.empty() ? make_prompt(args, tokenizer)
+                                        : parse_token_ids(token_ids);
   infer::Qwen2Model model(directory, runtime_options(args));
   const auto result = model.generate(prompt, args.get_int("--max-new-tokens", 128));
   std::cout << tokenizer.decode(result.tokens, true) << "\n\n"

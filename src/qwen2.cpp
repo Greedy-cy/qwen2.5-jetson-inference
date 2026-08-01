@@ -40,8 +40,6 @@ Qwen2Model::Qwen2Model(const std::filesystem::path& model_directory,
     : options_(options),
       config_(ModelConfig::load(model_directory / "config.json")),
       archive_(model_directory / archive_filename(options.precision)) {
-  INFER_CHECK(options_.precision != Precision::kW16A16,
-              "W16A16 uses BF16; archive support is ready but BF16 runtime kernels are not implemented");
   INFER_CHECK(options_.max_sequence_length > 0, "max sequence length must be positive");
   INFER_CHECK(options_.max_sequence_length <= config_.max_position_embeddings,
               "max sequence length exceeds model limit");
@@ -83,55 +81,100 @@ void Qwen2Model::initialize_workspace() {
   const int kv = config_.kv_dim();
   const int intermediate = config_.intermediate_size;
   const int vocab = config_.vocab_size;
-  const size_t float_count =
+  const bool use_bf16 = options_.precision == Precision::kW16A16;
+  const size_t element_size =
+      use_bf16 ? sizeof(__nv_bfloat16) : sizeof(float);
+  const size_t element_count =
       static_cast<size_t>(hidden) * 5 + static_cast<size_t>(kv) * 2 +
-      static_cast<size_t>(intermediate) * 3 + vocab + options_.max_sequence_length;
-  workspace_.resize(align_up(float_count * sizeof(float)), options_.backend);
-  auto* base = static_cast<float*>(workspace_.data());
-  size_t cursor = 0;
-  auto take = [&](int n) {
-    float* result = base + cursor;
-    cursor += static_cast<size_t>(n);
-    return result;
-  };
-  x_ = take(hidden);
-  norm_ = take(hidden);
-  q_ = take(hidden);
-  k_ = take(kv);
-  v_ = take(kv);
-  attention_ = take(hidden);
-  hidden_tmp_ = take(hidden);
-  gate_ = take(intermediate);
-  up_ = take(intermediate);
-  mlp_ = take(intermediate);
-  logits_ = take(vocab);
-  attention_scores_ = take(options_.max_sequence_length);
+      static_cast<size_t>(intermediate) * 3 + vocab +
+      options_.max_sequence_length;
+  workspace_.resize(align_up(element_count * element_size), options_.backend);
+
+  if (use_bf16) {
+    auto* base = static_cast<__nv_bfloat16*>(workspace_.data());
+    size_t cursor = 0;
+    auto take = [&](int count) {
+      __nv_bfloat16* result = base + cursor;
+      cursor += static_cast<size_t>(count);
+      return result;
+    };
+    bf16_x_ = take(hidden);
+    bf16_norm_ = take(hidden);
+    bf16_q_ = take(hidden);
+    bf16_k_ = take(kv);
+    bf16_v_ = take(kv);
+    bf16_attention_ = take(hidden);
+    bf16_hidden_tmp_ = take(hidden);
+    bf16_gate_ = take(intermediate);
+    bf16_up_ = take(intermediate);
+    bf16_mlp_ = take(intermediate);
+    bf16_logits_ = take(vocab);
+  } else {
+    auto* base = static_cast<float*>(workspace_.data());
+    size_t cursor = 0;
+    auto take = [&](int count) {
+      float* result = base + cursor;
+      cursor += static_cast<size_t>(count);
+      return result;
+    };
+    x_ = take(hidden);
+    norm_ = take(hidden);
+    q_ = take(hidden);
+    k_ = take(kv);
+    v_ = take(kv);
+    attention_ = take(hidden);
+    hidden_tmp_ = take(hidden);
+    gate_ = take(intermediate);
+    up_ = take(intermediate);
+    mlp_ = take(intermediate);
+    logits_ = take(vocab);
+    attention_scores_ = take(options_.max_sequence_length);
+  }
 
   const size_t row_width =
       static_cast<size_t>(hidden) * 5 + static_cast<size_t>(kv) * 2 +
       static_cast<size_t>(intermediate) * 3;
-  const size_t prefill_float_count =
+  const size_t prefill_element_count =
       static_cast<size_t>(options_.max_sequence_length) * row_width;
   prefill_workspace_.resize(
-      align_up(prefill_float_count * sizeof(float)), options_.backend);
-  auto* prefill_base = static_cast<float*>(prefill_workspace_.data());
-  size_t prefill_cursor = 0;
-  auto take_prefill = [&](int width) {
-    float* result = prefill_base + prefill_cursor;
-    prefill_cursor +=
-        static_cast<size_t>(options_.max_sequence_length) * width;
-    return result;
-  };
-  prefill_x_ = take_prefill(hidden);
-  prefill_norm_ = take_prefill(hidden);
-  prefill_q_ = take_prefill(hidden);
-  prefill_k_ = take_prefill(kv);
-  prefill_v_ = take_prefill(kv);
-  prefill_attention_ = take_prefill(hidden);
-  prefill_hidden_tmp_ = take_prefill(hidden);
-  prefill_gate_ = take_prefill(intermediate);
-  prefill_up_ = take_prefill(intermediate);
-  prefill_mlp_ = take_prefill(intermediate);
+      align_up(prefill_element_count * element_size), options_.backend);
+  if (use_bf16) {
+    auto* base = static_cast<__nv_bfloat16*>(prefill_workspace_.data());
+    size_t cursor = 0;
+    auto take = [&](int width) {
+      __nv_bfloat16* result = base + cursor;
+      cursor += static_cast<size_t>(options_.max_sequence_length) * width;
+      return result;
+    };
+    bf16_prefill_x_ = take(hidden);
+    bf16_prefill_norm_ = take(hidden);
+    bf16_prefill_q_ = take(hidden);
+    bf16_prefill_k_ = take(kv);
+    bf16_prefill_v_ = take(kv);
+    bf16_prefill_attention_ = take(hidden);
+    bf16_prefill_hidden_tmp_ = take(hidden);
+    bf16_prefill_gate_ = take(intermediate);
+    bf16_prefill_up_ = take(intermediate);
+    bf16_prefill_mlp_ = take(intermediate);
+  } else {
+    auto* base = static_cast<float*>(prefill_workspace_.data());
+    size_t cursor = 0;
+    auto take = [&](int width) {
+      float* result = base + cursor;
+      cursor += static_cast<size_t>(options_.max_sequence_length) * width;
+      return result;
+    };
+    prefill_x_ = take(hidden);
+    prefill_norm_ = take(hidden);
+    prefill_q_ = take(hidden);
+    prefill_k_ = take(kv);
+    prefill_v_ = take(kv);
+    prefill_attention_ = take(hidden);
+    prefill_hidden_tmp_ = take(hidden);
+    prefill_gate_ = take(intermediate);
+    prefill_up_ = take(intermediate);
+    prefill_mlp_ = take(intermediate);
+  }
   if (options_.backend == Device::kCuda) {
     prefill_tokens_.resize(
         options_.max_sequence_length * sizeof(int), Device::kCuda);
@@ -139,10 +182,12 @@ void Qwen2Model::initialize_workspace() {
 
   const size_t per_layer = static_cast<size_t>(config_.num_kv_heads) *
                            options_.max_sequence_length * config_.head_dim();
-  kv_cache_.resize(2 * config_.num_layers * per_layer * sizeof(float), options_.backend);
-  if (options_.backend == Device::kCuda) argmax_buffer_.resize(sizeof(int), Device::kCuda);
+  kv_cache_.resize(
+      2 * config_.num_layers * per_layer * element_size, options_.backend);
+  if (options_.backend == Device::kCuda) {
+    argmax_buffer_.resize(sizeof(int), Device::kCuda);
+  }
 }
-
 const void* Qwen2Model::weight(std::string_view name) const {
   const auto it = weights_.find(std::string(name));
   INFER_CHECK(it != weights_.end(), "missing runtime weight: " + std::string(name));
@@ -158,6 +203,38 @@ const float* Qwen2Model::float_weight(std::string_view name) const {
 const float* Qwen2Model::optional_float_weight(std::string_view name) const {
   if (name.empty() || !archive_.contains(name)) return nullptr;
   return float_weight(name);
+}
+
+
+const __nv_bfloat16* Qwen2Model::bf16_weight(std::string_view name) const {
+  INFER_CHECK(archive_.record(name).dtype == DType::kBFloat16,
+              "expected bfloat16 weight: " + std::string(name));
+  return static_cast<const __nv_bfloat16*>(weight(name));
+}
+
+const __nv_bfloat16* Qwen2Model::optional_bf16_weight(
+    std::string_view name) const {
+  if (name.empty() || !archive_.contains(name)) return nullptr;
+  return bf16_weight(name);
+}
+
+void Qwen2Model::linear_cuda_bf16(
+    std::string_view weight_name, std::string_view bias_name,
+    const __nv_bfloat16* input, __nv_bfloat16* output, int out_features,
+    int in_features) {
+  INFER_CHECK(options_.backend == Device::kCuda &&
+                  options_.precision == Precision::kW16A16,
+              "BF16 linear requires CUDA W16A16");
+  const auto* weight_pointer = bf16_weight(weight_name);
+  const auto* bias = optional_bf16_weight(bias_name);
+  if (options_.linear_kernel == LinearKernel::kCublas) {
+    cuda::gemv_bf16_cublas(
+        cuda_context_->cublas(), weight_pointer, bias, input, output,
+        out_features, in_features, cuda_context_->stream());
+  } else {
+    cuda::gemv_bf16(weight_pointer, bias, input, output, out_features,
+                    in_features, cuda_context_->stream());
+  }
 }
 
 void Qwen2Model::linear(std::string_view weight_name, std::string_view bias_name,
@@ -193,6 +270,26 @@ void Qwen2Model::linear(std::string_view weight_name, std::string_view bias_name
                     float_weight(rec.quant->scale_tensor), rec.quant->group_size,
                     bias, input, output, out_features, in_features,
                     cuda_context_->stream());
+  }
+}
+
+
+void Qwen2Model::linear_cuda_bf16_batch(
+    std::string_view weight_name, std::string_view bias_name,
+    const __nv_bfloat16* input, __nv_bfloat16* output, int token_count,
+    int out_features, int in_features) {
+  INFER_CHECK(options_.backend == Device::kCuda &&
+                  options_.precision == Precision::kW16A16,
+              "batched BF16 linear requires CUDA W16A16");
+  const auto* weight_pointer = bf16_weight(weight_name);
+  const auto* bias = optional_bf16_weight(bias_name);
+  if (options_.linear_kernel == LinearKernel::kCublas) {
+    cuda::gemm_bf16_cublas(
+        cuda_context_->cublas(), weight_pointer, bias, input, output,
+        token_count, out_features, in_features, cuda_context_->stream());
+  } else {
+    cuda::gemm_bf16(weight_pointer, bias, input, output, token_count,
+                    out_features, in_features, cuda_context_->stream());
   }
 }
 
@@ -253,6 +350,21 @@ float* Qwen2Model::layer_value_cache(int layer) {
   const size_t per_layer = static_cast<size_t>(config_.num_kv_heads) *
                            options_.max_sequence_length * config_.head_dim();
   return static_cast<float*>(kv_cache_.data()) +
+         static_cast<size_t>(config_.num_layers + layer) * per_layer;
+}
+
+
+__nv_bfloat16* Qwen2Model::bf16_layer_key_cache(int layer) {
+  const size_t per_layer = static_cast<size_t>(config_.num_kv_heads) *
+                           options_.max_sequence_length * config_.head_dim();
+  return static_cast<__nv_bfloat16*>(kv_cache_.data()) +
+         static_cast<size_t>(layer) * per_layer;
+}
+
+__nv_bfloat16* Qwen2Model::bf16_layer_value_cache(int layer) {
+  const size_t per_layer = static_cast<size_t>(config_.num_kv_heads) *
+                           options_.max_sequence_length * config_.head_dim();
+  return static_cast<__nv_bfloat16*>(kv_cache_.data()) +
          static_cast<size_t>(config_.num_layers + layer) * per_layer;
 }
 
@@ -376,7 +488,111 @@ int Qwen2Model::prefill_cpu_fp32(const std::vector<int>& prompt_tokens) {
   return cpu::argmax(logits_, config_.vocab_size);
 }
 
+int Qwen2Model::prefill_cuda_bf16(
+    const std::vector<int>& prompt_tokens) {
+  INFER_CHECK(options_.backend == Device::kCuda &&
+                  options_.precision == Precision::kW16A16,
+              "BF16 prefill requires CUDA W16A16");
+  INFER_CHECK(prefill_workspace_.data() != nullptr &&
+                  prefill_tokens_.data() != nullptr,
+              "BF16 prefill workspace was not allocated");
+  const int token_count = static_cast<int>(prompt_tokens.size());
+  const int hidden = config_.hidden_size;
+  const int kv_dim = config_.kv_dim();
+  const int head_dim = config_.head_dim();
+  const int intermediate = config_.intermediate_size;
+  auto stream = cuda_context_->stream();
+
+  INFER_CUDA_CHECK(cudaMemcpyAsync(
+      prefill_tokens_.data(), prompt_tokens.data(),
+      static_cast<size_t>(token_count) * sizeof(int), cudaMemcpyHostToDevice,
+      stream));
+  cuda::embedding_batch_bf16(
+      bf16_weight("model.embed_tokens.weight"),
+      static_cast<const int*>(prefill_tokens_.data()), bf16_prefill_x_,
+      token_count, hidden, stream);
+  for (int layer = 0; layer < config_.num_layers; ++layer) {
+    const auto prefix = layer_prefix(layer);
+    cuda::rms_norm_batch_bf16(
+        bf16_prefill_x_,
+        bf16_weight(prefix + "input_layernorm.weight"),
+        bf16_prefill_norm_, token_count, hidden, config_.rms_norm_eps, stream);
+    linear_cuda_bf16_batch(
+        prefix + "self_attn.q_proj.weight",
+        prefix + "self_attn.q_proj.bias", bf16_prefill_norm_,
+        bf16_prefill_q_, token_count, hidden, hidden);
+    linear_cuda_bf16_batch(
+        prefix + "self_attn.k_proj.weight",
+        prefix + "self_attn.k_proj.bias", bf16_prefill_norm_,
+        bf16_prefill_k_, token_count, kv_dim, hidden);
+    linear_cuda_bf16_batch(
+        prefix + "self_attn.v_proj.weight",
+        prefix + "self_attn.v_proj.bias", bf16_prefill_norm_,
+        bf16_prefill_v_, token_count, kv_dim, hidden);
+    cuda::rope_batch_bf16(
+        bf16_prefill_q_, bf16_prefill_k_, token_count, config_.num_heads,
+        config_.num_kv_heads, head_dim, 0, config_.rope_theta, stream);
+    auto* key_cache = bf16_layer_key_cache(layer);
+    auto* value_cache = bf16_layer_value_cache(layer);
+    cuda::store_kv_batch_bf16(
+        bf16_prefill_k_, bf16_prefill_v_, key_cache, value_cache, token_count,
+        config_.num_kv_heads, head_dim, options_.max_sequence_length, stream);
+    cuda::attention_prefill_bf16(
+        bf16_prefill_q_, key_cache, value_cache, bf16_prefill_attention_,
+        token_count, config_.num_heads, config_.num_kv_heads, head_dim,
+        options_.max_sequence_length, stream);
+    linear_cuda_bf16_batch(
+        prefix + "self_attn.o_proj.weight", {}, bf16_prefill_attention_,
+        bf16_prefill_hidden_tmp_, token_count, hidden, hidden);
+    cuda::add_inplace_bf16(
+        bf16_prefill_x_, bf16_prefill_hidden_tmp_, token_count * hidden,
+        stream);
+    cuda::rms_norm_batch_bf16(
+        bf16_prefill_x_,
+        bf16_weight(prefix + "post_attention_layernorm.weight"),
+        bf16_prefill_norm_, token_count, hidden, config_.rms_norm_eps, stream);
+    linear_cuda_bf16_batch(
+        prefix + "mlp.gate_proj.weight", {}, bf16_prefill_norm_,
+        bf16_prefill_gate_, token_count, intermediate, hidden);
+    linear_cuda_bf16_batch(
+        prefix + "mlp.up_proj.weight", {}, bf16_prefill_norm_,
+        bf16_prefill_up_, token_count, intermediate, hidden);
+    cuda::silu_mul_bf16(
+        bf16_prefill_gate_, bf16_prefill_up_, bf16_prefill_mlp_,
+        token_count * intermediate, stream);
+    linear_cuda_bf16_batch(
+        prefix + "mlp.down_proj.weight", {}, bf16_prefill_mlp_,
+        bf16_prefill_hidden_tmp_, token_count, hidden, intermediate);
+    cuda::add_inplace_bf16(
+        bf16_prefill_x_, bf16_prefill_hidden_tmp_, token_count * hidden,
+        stream);
+  }
+
+  const auto* last_hidden =
+      bf16_prefill_x_ + static_cast<size_t>(token_count - 1) * hidden;
+  cuda::rms_norm_bf16(
+      last_hidden, bf16_weight("model.norm.weight"), bf16_norm_, hidden,
+      config_.rms_norm_eps, stream);
+  const std::string lm_head = archive_.contains("lm_head.weight")
+                                  ? "lm_head.weight"
+                                  : "model.embed_tokens.weight";
+  linear_cuda_bf16(
+      lm_head, {}, bf16_norm_, bf16_logits_, config_.vocab_size, hidden);
+  cuda::argmax_bf16(
+      bf16_logits_, config_.vocab_size,
+      static_cast<int*>(argmax_buffer_.data()), stream);
+  int result = 0;
+  INFER_CUDA_CHECK(cudaMemcpyAsync(
+      &result, argmax_buffer_.data(), sizeof(int), cudaMemcpyDeviceToHost,
+      stream));
+  cuda_context_->synchronize();
+  return result;
+}
+
 int Qwen2Model::prefill_cuda(const std::vector<int>& prompt_tokens) {
+  if (options_.precision == Precision::kW16A16) {
+    return prefill_cuda_bf16(prompt_tokens);
+  }
   INFER_CHECK(options_.backend == Device::kCuda,
               "CUDA matrixized prefill requires CUDA backend");
   INFER_CHECK(prefill_workspace_.data() != nullptr &&
@@ -460,7 +676,91 @@ int Qwen2Model::prefill_cuda(const std::vector<int>& prompt_tokens) {
   return result;
 }
 
+int Qwen2Model::decode_token_cuda_bf16(int token, int position) {
+  INFER_CHECK(options_.backend == Device::kCuda &&
+                  options_.precision == Precision::kW16A16,
+              "BF16 decode requires CUDA W16A16");
+  const int hidden = config_.hidden_size;
+  const int kv_dim = config_.kv_dim();
+  const int head_dim = config_.head_dim();
+  auto stream = cuda_context_->stream();
+
+  cuda::embedding_bf16(
+      bf16_weight("model.embed_tokens.weight"), token, bf16_x_, hidden,
+      stream);
+  for (int layer = 0; layer < config_.num_layers; ++layer) {
+    const auto prefix = layer_prefix(layer);
+    cuda::rms_norm_bf16(
+        bf16_x_, bf16_weight(prefix + "input_layernorm.weight"), bf16_norm_,
+        hidden, config_.rms_norm_eps, stream);
+    linear_cuda_bf16(
+        prefix + "self_attn.q_proj.weight",
+        prefix + "self_attn.q_proj.bias", bf16_norm_, bf16_q_, hidden,
+        hidden);
+    linear_cuda_bf16(
+        prefix + "self_attn.k_proj.weight",
+        prefix + "self_attn.k_proj.bias", bf16_norm_, bf16_k_, kv_dim,
+        hidden);
+    linear_cuda_bf16(
+        prefix + "self_attn.v_proj.weight",
+        prefix + "self_attn.v_proj.bias", bf16_norm_, bf16_v_, kv_dim,
+        hidden);
+    cuda::rope_bf16(
+        bf16_q_, bf16_k_, config_.num_heads, config_.num_kv_heads, head_dim,
+        position, config_.rope_theta, stream);
+    auto* key_cache = bf16_layer_key_cache(layer);
+    auto* value_cache = bf16_layer_value_cache(layer);
+    cuda::store_kv_bf16(
+        bf16_k_, bf16_v_, key_cache, value_cache, config_.num_kv_heads,
+        head_dim, position, options_.max_sequence_length, stream);
+    cuda::attention_decode_bf16(
+        bf16_q_, key_cache, value_cache, bf16_attention_, config_.num_heads,
+        config_.num_kv_heads, head_dim, position + 1,
+        options_.max_sequence_length, stream);
+    linear_cuda_bf16(
+        prefix + "self_attn.o_proj.weight", {}, bf16_attention_,
+        bf16_hidden_tmp_, hidden, hidden);
+    cuda::add_inplace_bf16(bf16_x_, bf16_hidden_tmp_, hidden, stream);
+    cuda::rms_norm_bf16(
+        bf16_x_, bf16_weight(prefix + "post_attention_layernorm.weight"),
+        bf16_norm_, hidden, config_.rms_norm_eps, stream);
+    linear_cuda_bf16(
+        prefix + "mlp.gate_proj.weight", {}, bf16_norm_, bf16_gate_,
+        config_.intermediate_size, hidden);
+    linear_cuda_bf16(
+        prefix + "mlp.up_proj.weight", {}, bf16_norm_, bf16_up_,
+        config_.intermediate_size, hidden);
+    cuda::silu_mul_bf16(
+        bf16_gate_, bf16_up_, bf16_mlp_, config_.intermediate_size, stream);
+    linear_cuda_bf16(
+        prefix + "mlp.down_proj.weight", {}, bf16_mlp_, bf16_hidden_tmp_,
+        hidden, config_.intermediate_size);
+    cuda::add_inplace_bf16(bf16_x_, bf16_hidden_tmp_, hidden, stream);
+  }
+
+  cuda::rms_norm_bf16(
+      bf16_x_, bf16_weight("model.norm.weight"), bf16_norm_, hidden,
+      config_.rms_norm_eps, stream);
+  const std::string lm_head = archive_.contains("lm_head.weight")
+                                  ? "lm_head.weight"
+                                  : "model.embed_tokens.weight";
+  linear_cuda_bf16(
+      lm_head, {}, bf16_norm_, bf16_logits_, config_.vocab_size, hidden);
+  cuda::argmax_bf16(
+      bf16_logits_, config_.vocab_size,
+      static_cast<int*>(argmax_buffer_.data()), stream);
+  int result = 0;
+  INFER_CUDA_CHECK(cudaMemcpyAsync(
+      &result, argmax_buffer_.data(), sizeof(int), cudaMemcpyDeviceToHost,
+      stream));
+  cuda_context_->synchronize();
+  return result;
+}
+
 int Qwen2Model::decode_token_cuda(int token, int position) {
+  if (options_.precision == Precision::kW16A16) {
+    return decode_token_cuda_bf16(token, position);
+  }
   const int hidden = config_.hidden_size;
   const int kv_dim = config_.kv_dim();
   const int head_dim = config_.head_dim();
@@ -524,9 +824,20 @@ std::vector<float> Qwen2Model::last_logits_host() const {
   std::vector<float> result(static_cast<size_t>(config_.vocab_size));
   if (options_.backend == Device::kCpu) {
     std::copy(logits_, logits_ + config_.vocab_size, result.begin());
+  } else if (options_.precision == Precision::kW16A16) {
+    std::vector<uint16_t> bits(result.size());
+    INFER_CUDA_CHECK(cudaMemcpyAsync(
+        bits.data(), bf16_logits_, bits.size() * sizeof(uint16_t),
+        cudaMemcpyDeviceToHost, cuda_context_->stream()));
+    cuda_context_->synchronize();
+    for (size_t index = 0; index < bits.size(); ++index) {
+      const uint32_t fp32_bits = static_cast<uint32_t>(bits[index]) << 16u;
+      std::memcpy(&result[index], &fp32_bits, sizeof(float));
+    }
   } else {
-    INFER_CUDA_CHECK(cudaMemcpyAsync(result.data(), logits_, result.size() * sizeof(float),
-                                     cudaMemcpyDeviceToHost, cuda_context_->stream()));
+    INFER_CUDA_CHECK(cudaMemcpyAsync(
+        result.data(), logits_, result.size() * sizeof(float),
+        cudaMemcpyDeviceToHost, cuda_context_->stream()));
     cuda_context_->synchronize();
   }
   return result;

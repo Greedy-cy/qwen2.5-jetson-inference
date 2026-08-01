@@ -134,6 +134,64 @@ class TinyQwen2Model {
                    static_cast<std::streamsize>(tensor.values.size() * sizeof(float)));
     }
     if (!output.good()) throw std::runtime_error("failed to write tiny model archive");
+
+    output.close();
+
+    nlohmann::json bf16_metadata{{"tensors", nlohmann::json::array()}};
+    uint64_t bf16_offset = 0;
+    std::vector<std::vector<uint16_t>> bf16_values;
+    bf16_values.reserve(tensors.size());
+    for (const auto& tensor : tensors) {
+      std::vector<uint16_t> values(tensor.values.size());
+      for (size_t index = 0; index < tensor.values.size(); ++index) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &tensor.values[index], sizeof(bits));
+        bits += 0x7fffu + ((bits >> 16u) & 1u);
+        values[index] = static_cast<uint16_t>(bits >> 16u);
+      }
+      const uint64_t bytes = values.size() * sizeof(uint16_t);
+      bf16_metadata["tensors"].push_back({
+          {"name", tensor.name},
+          {"shape", tensor.shape},
+          {"dtype", "bfloat16"},
+          {"offset", bf16_offset},
+          {"nbytes", bytes},
+      });
+      bf16_offset += bytes;
+      bf16_values.push_back(std::move(values));
+    }
+    const std::string bf16_metadata_text = bf16_metadata.dump();
+    TestArchiveHeader bf16_header{};
+    std::memcpy(
+        bf16_header.magic, "QWENBIN1", sizeof(bf16_header.magic));
+    bf16_header.version = 1;
+    bf16_header.json_size =
+        static_cast<uint32_t>(bf16_metadata_text.size());
+    bf16_header.data_offset =
+        align_up(sizeof(bf16_header) + bf16_metadata_text.size(), 256);
+
+    std::ofstream bf16_output(
+        path_ / "model.w16a16.qbin", std::ios::binary);
+    bf16_output.write(
+        reinterpret_cast<const char*>(&bf16_header), sizeof(bf16_header));
+    bf16_output.write(
+        bf16_metadata_text.data(),
+        static_cast<std::streamsize>(bf16_metadata_text.size()));
+    const std::vector<char> bf16_padding(
+        bf16_header.data_offset - sizeof(bf16_header) -
+            bf16_metadata_text.size(),
+        0);
+    bf16_output.write(
+        bf16_padding.data(),
+        static_cast<std::streamsize>(bf16_padding.size()));
+    for (const auto& values : bf16_values) {
+      bf16_output.write(
+          reinterpret_cast<const char*>(values.data()),
+          static_cast<std::streamsize>(values.size() * sizeof(uint16_t)));
+    }
+    if (!bf16_output.good()) {
+      throw std::runtime_error("failed to write tiny BF16 model archive");
+    }
   }
 
   std::filesystem::path path_;
@@ -145,6 +203,24 @@ infer::RuntimeOptions cpu_options(int max_sequence_length = 32) {
   options.precision = infer::Precision::kFloat32;
   options.max_sequence_length = max_sequence_length;
   return options;
+}
+
+
+infer::RuntimeOptions cuda_bf16_options(
+    int max_sequence_length = 32,
+    infer::LinearKernel kernel = infer::LinearKernel::kCublas) {
+  infer::RuntimeOptions options;
+  options.backend = infer::Device::kCuda;
+  options.precision = infer::Precision::kW16A16;
+  options.max_sequence_length = max_sequence_length;
+  options.linear_kernel = kernel;
+  return options;
+}
+
+uint64_t archive_payload_bytes(const infer::ModelArchive& archive) {
+  uint64_t bytes = 0;
+  for (const auto& record : archive.records()) bytes += record.nbytes;
+  return bytes;
 }
 
 void expect_logits_equal(const infer::Qwen2Model& lhs, const infer::Qwen2Model& rhs) {
@@ -331,4 +407,84 @@ TEST(Qwen2MatrixizedPrefill, CudaCublasMatchesCustomKernel) {
     EXPECT_GE(logits_cosine(custom, cublas), 0.999999);
     token = custom_next;
   }
+}
+
+TEST(Qwen2BFloat16, PrefillMatchesFp32AcrossFixedPrompts) {
+  int devices = 0;
+  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    GTEST_SKIP();
+  }
+  TinyQwen2Model tiny;
+  constexpr std::array<int, 5> lengths{1, 2, 5, 8, 31};
+  for (const int length : lengths) {
+    SCOPED_TRACE("prompt_length=" + std::to_string(length));
+    infer::Qwen2Model fp32(tiny.path(), cpu_options(32));
+    infer::Qwen2Model bf16(tiny.path(), cuda_bf16_options(32));
+    const auto prompt = prompt_tokens(static_cast<size_t>(length));
+    const int fp32_next = fp32.prefill(prompt);
+    const int bf16_next = bf16.prefill(prompt);
+    EXPECT_EQ(bf16_next, fp32_next);
+    EXPECT_GE(logits_cosine(fp32, bf16), 0.9999);
+    EXPECT_EQ(bf16.position(), length);
+    for (const float logit : bf16.last_logits_host()) {
+      EXPECT_TRUE(std::isfinite(logit));
+    }
+  }
+}
+
+TEST(Qwen2BFloat16, PrefillKvStateContinuesDecodeFor16Tokens) {
+  int devices = 0;
+  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    GTEST_SKIP();
+  }
+  TinyQwen2Model tiny;
+  infer::Qwen2Model fp32(tiny.path(), cpu_options(32));
+  infer::Qwen2Model bf16(tiny.path(), cuda_bf16_options(32));
+  const auto prompt = prompt_tokens(8);
+
+  int token = fp32.prefill(prompt);
+  ASSERT_EQ(bf16.prefill(prompt), token);
+  EXPECT_GE(logits_cosine(fp32, bf16), 0.9999);
+  for (int step = 0; step < 16; ++step) {
+    SCOPED_TRACE("decode_step=" + std::to_string(step));
+    const int fp32_next = fp32.decode_next(token);
+    const int bf16_next = bf16.decode_next(token);
+    ASSERT_EQ(bf16_next, fp32_next);
+    EXPECT_GE(logits_cosine(fp32, bf16), 0.9999);
+    token = fp32_next;
+  }
+  EXPECT_EQ(bf16.position(), 24);
+}
+
+TEST(Qwen2BFloat16, CustomMatchesCublasAndUsesBf16Storage) {
+  int devices = 0;
+  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    GTEST_SKIP();
+  }
+  TinyQwen2Model tiny;
+  infer::Qwen2Model fp32(tiny.path(), cpu_options(64));
+  infer::Qwen2Model custom(
+      tiny.path(),
+      cuda_bf16_options(64, infer::LinearKernel::kCustom));
+  infer::Qwen2Model cublas(
+      tiny.path(),
+      cuda_bf16_options(64, infer::LinearKernel::kCublas));
+  const auto prompt = prompt_tokens(32);
+
+  int token = custom.prefill(prompt);
+  ASSERT_EQ(cublas.prefill(prompt), token);
+  EXPECT_GE(logits_cosine(custom, cublas), 0.9999);
+  for (int step = 0; step < 8; ++step) {
+    const int custom_next = custom.decode_next(token);
+    const int cublas_next = cublas.decode_next(token);
+    ASSERT_EQ(cublas_next, custom_next);
+    EXPECT_GE(logits_cosine(custom, cublas), 0.9999);
+    token = custom_next;
+  }
+
+  EXPECT_EQ(cublas.kv_cache_bytes() * 2, fp32.kv_cache_bytes());
+  EXPECT_LE(cublas.workspace_bytes(),
+            static_cast<size_t>(fp32.workspace_bytes() * 0.55));
+  EXPECT_EQ(archive_payload_bytes(cublas.archive()) * 2,
+            archive_payload_bytes(fp32.archive()));
 }

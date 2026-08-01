@@ -72,6 +72,10 @@ class Qwen2Model {
   void linear(std::string_view weight_name, std::string_view bias_name,
               const float* input, float* output, int out_features,
               int in_features, bool prefer_cublas = false);
+  void linear_cuda_bf16(std::string_view weight_name,
+                         std::string_view bias_name,
+                         const __nv_bfloat16* input, __nv_bfloat16* output,
+                         int out_features, int in_features);
   void linear_cpu_fp32_batch(std::string_view weight_name,
                              std::string_view bias_name, const float* input,
                              float* output, int token_count, int out_features,
@@ -80,16 +84,27 @@ class Qwen2Model {
                          std::string_view bias_name, const float* input,
                          float* output, int token_count, int out_features,
                          int in_features);
+  void linear_cuda_bf16_batch(std::string_view weight_name,
+                              std::string_view bias_name,
+                              const __nv_bfloat16* input,
+                              __nv_bfloat16* output, int token_count,
+                              int out_features, int in_features);
   const void* weight(std::string_view name) const;
   const float* float_weight(std::string_view name) const;
   const float* optional_float_weight(std::string_view name) const;
+  const __nv_bfloat16* bf16_weight(std::string_view name) const;
+  const __nv_bfloat16* optional_bf16_weight(std::string_view name) const;
   float* layer_key_cache(int layer);
   float* layer_value_cache(int layer);
+  __nv_bfloat16* bf16_layer_key_cache(int layer);
+  __nv_bfloat16* bf16_layer_value_cache(int layer);
   int decode_token(int token, int position);
   int decode_token_cpu(int token, int position);
   int prefill_cpu_fp32(const std::vector<int>& prompt_tokens);
   int prefill_cuda(const std::vector<int>& prompt_tokens);
+  int prefill_cuda_bf16(const std::vector<int>& prompt_tokens);
   int decode_token_cuda(int token, int position);
+  int decode_token_cuda_bf16(int token, int position);
   void synchronize() const;
 
   RuntimeOptions options_;
@@ -126,6 +141,27 @@ class Qwen2Model {
   float* prefill_gate_{nullptr};
   float* prefill_up_{nullptr};
   float* prefill_mlp_{nullptr};
+  __nv_bfloat16* bf16_x_{nullptr};
+  __nv_bfloat16* bf16_norm_{nullptr};
+  __nv_bfloat16* bf16_q_{nullptr};
+  __nv_bfloat16* bf16_k_{nullptr};
+  __nv_bfloat16* bf16_v_{nullptr};
+  __nv_bfloat16* bf16_attention_{nullptr};
+  __nv_bfloat16* bf16_hidden_tmp_{nullptr};
+  __nv_bfloat16* bf16_gate_{nullptr};
+  __nv_bfloat16* bf16_up_{nullptr};
+  __nv_bfloat16* bf16_mlp_{nullptr};
+  __nv_bfloat16* bf16_logits_{nullptr};
+  __nv_bfloat16* bf16_prefill_x_{nullptr};
+  __nv_bfloat16* bf16_prefill_norm_{nullptr};
+  __nv_bfloat16* bf16_prefill_q_{nullptr};
+  __nv_bfloat16* bf16_prefill_k_{nullptr};
+  __nv_bfloat16* bf16_prefill_v_{nullptr};
+  __nv_bfloat16* bf16_prefill_attention_{nullptr};
+  __nv_bfloat16* bf16_prefill_hidden_tmp_{nullptr};
+  __nv_bfloat16* bf16_prefill_gate_{nullptr};
+  __nv_bfloat16* bf16_prefill_up_{nullptr};
+  __nv_bfloat16* bf16_prefill_mlp_{nullptr};
   int position_{0};
   bool has_prefilled_{false};
 };
