@@ -1,4 +1,4 @@
-# CPU FP32 串行基线
+# CODEX-CP03｜CPU FP32 串行基线
 
 ## 结论
 
@@ -85,4 +85,4 @@ taskset -c 0-5 python3 tools/run_benchmark.py \
   --lock-clocks --output results/cpu-fp32-6threads-serial.json
 ```
 
-原始结果保存在忽略目录 `results/`；审核后的轻量数据位于 `benchmarks/results/cpu-fp32-serial-summary.json`。后续对比必须引用这里记录的 commit、模型 SHA 和 workload，避免混用不同测试口径。
+原始结果保存在忽略目录 `results/`；审核后的轻量数据位于 `benchmarks/results/codex-cp03-cpu-fp32-serial-summary.json`。后续对比必须引用这里记录的 commit、模型 SHA 和 workload，避免混用不同测试口径。

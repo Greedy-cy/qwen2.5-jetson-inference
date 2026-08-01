@@ -1,5 +1,7 @@
 {
   "schema_version": 1,
+  "artifact_id": "CODEX-CP03",
+  "artifact_origin": "codex_session",
   "checkpoint": 3,
   "status": "accepted",
   "description": "Qwen2.5-0.5B-Instruct CPU FP32 legacy-serial baseline on Jetson Orin Nano Super",

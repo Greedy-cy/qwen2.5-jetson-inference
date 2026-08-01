@@ -1,4 +1,4 @@
-# CUDA FP32 与 W8A32 串行参考
+# CODEX-CP04｜CUDA FP32 与 W8A32 串行参考
 
 ## 结论
 
@@ -126,6 +126,6 @@ taskset -c 0-5 python3 tools/run_benchmark.py \
 
 W8A32 使用相同命令，将 precision 改为 `w8a32`、输出文件改为 `cuda-w8a32-serial.json`。
 
-原始 benchmark JSON 位于忽略的 `results/`；原始 `.nsys-rep` 和导出 SQLite 位于忽略的 `profiles/`；审核后的数据位于 `benchmarks/results/cuda-serial-summary.json`。摘要保存了模型与 trace SHA-256。
+原始 benchmark JSON 位于忽略的 `results/`；原始 `.nsys-rep` 和导出 SQLite 位于忽略的 `profiles/`；审核后的数据位于 `benchmarks/results/codex-cp04-cuda-fp32-w8a32-serial-summary.json`。摘要保存了模型与 trace SHA-256。
 
 后续 A16 路线按项目约定使用 BF16：W16A16 表示 BF16 权重/激活基线，W8A16 表示 INT8 Linear 权重与 BF16 激活，不采用 FP16。

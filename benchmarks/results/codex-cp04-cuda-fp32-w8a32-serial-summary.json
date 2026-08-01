@@ -1,5 +1,7 @@
 {
   "schema_version": 1,
+  "artifact_id": "CODEX-CP04",
+  "artifact_origin": "codex_session",
   "checkpoint": 4,
   "status": "accepted",
   "description": "CUDA FP32 and W8A32 legacy-serial reference on Qwen2.5-0.5B-Instruct",
