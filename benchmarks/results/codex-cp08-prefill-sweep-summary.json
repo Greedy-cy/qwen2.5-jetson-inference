@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "checkpoint": "CODEX-CP08",
+  "title": "Formal serial vs batched prefill validation",
+  "status": "passed",
+  "commit": "d667fb113619ef133dea7f54085216799cf1ae72",
+  "device": {
+    "name": "Jetson Orin Nano Super 8GB",
+    "power_mode": "MAXN_SUPER",
+    "cuda": "12.6",
+    "clocks_locked_per_run": true,
+    "clocks_restored_after_sweep": true,
+    "maximum_temperature_c": 75.25
+  },
+  "models": {
+    "fp32_sha256": "a58918c8fcbe0332c3a09d233f14425d1ecf32facca658b92203ff89d81c0b63",
+    "w8a32_sha256": "6315f60dce24ee6f4e2b9609c69df222c2d02e78f37f1c1f21d13d8b20793d90"
+  },
+  "protocol": {
+    "prompt_lengths": [1, 32, 128, 512],
+    "max_sequence_length": 512,
+    "max_new_tokens": 1,
+    "warmup": 5,
+    "repeat": 20,
+    "telemetry_interval_ms": 100,
+    "cpu_threads": 6,
+    "cpu_affinity": "0-5",
+    "raw_result_count": 28,
+    "maximum_ttft_cv_percent": 2.05
+  },
+  "comparisons": {
+    "cpu_fp32": [
+      {"prompt": 1, "serial_ttft_ms": 71.411, "batched_ttft_ms": 129.087, "speedup": 0.553, "serial_tok_s": 14.01, "batched_tok_s": 7.75, "energy_reduction_percent": -87.19},
+      {"prompt": 32, "serial_ttft_ms": 2309.908, "batched_ttft_ms": 355.420, "speedup": 6.499, "serial_tok_s": 13.85, "batched_tok_s": 90.04, "energy_reduction_percent": 85.42},
+      {"prompt": 128, "serial_ttft_ms": 9388.482, "batched_ttft_ms": 1133.086, "speedup": 8.286, "serial_tok_s": 13.63, "batched_tok_s": 112.97, "energy_reduction_percent": 89.00},
+      {"prompt": 512, "serial_ttft_ms": 40361.326, "batched_ttft_ms": 6647.901, "speedup": 6.071, "serial_tok_s": 12.69, "batched_tok_s": 77.02, "energy_reduction_percent": 86.69}
+    ],
+    "cuda_fp32_custom": [
+      {"prompt": 1, "serial_ttft_ms": 43.263, "batched_ttft_ms": 254.250, "speedup": 0.170, "serial_tok_s": 23.11, "batched_tok_s": 3.93, "energy_reduction_percent": -387.57},
+      {"prompt": 32, "serial_ttft_ms": 1390.069, "batched_ttft_ms": 494.785, "speedup": 2.809, "serial_tok_s": 23.02, "batched_tok_s": 64.67, "energy_reduction_percent": 75.24},
+      {"prompt": 128, "serial_ttft_ms": 5582.747, "batched_ttft_ms": 1950.669, "speedup": 2.862, "serial_tok_s": 22.93, "batched_tok_s": 65.62, "energy_reduction_percent": 75.69},
+      {"prompt": 512, "serial_ttft_ms": 22761.997, "batched_ttft_ms": 8044.329, "speedup": 2.830, "serial_tok_s": 22.49, "batched_tok_s": 63.65, "energy_reduction_percent": 75.41}
+    ],
+    "cuda_fp32_cublas": [
+      {"prompt": 1, "serial_ttft_ms": 43.263, "batched_ttft_ms": 24.000, "speedup": 1.803, "serial_tok_s": 23.11, "batched_tok_s": 41.67, "energy_reduction_percent": 39.70},
+      {"prompt": 32, "serial_ttft_ms": 1390.069, "batched_ttft_ms": 40.382, "speedup": 34.423, "serial_tok_s": 23.02, "batched_tok_s": 792.43, "energy_reduction_percent": 97.32},
+      {"prompt": 128, "serial_ttft_ms": 5582.747, "batched_ttft_ms": 116.783, "speedup": 47.804, "serial_tok_s": 22.93, "batched_tok_s": 1096.05, "energy_reduction_percent": 97.56},
+      {"prompt": 512, "serial_ttft_ms": 22761.997, "batched_ttft_ms": 738.301, "speedup": 30.830, "serial_tok_s": 22.49, "batched_tok_s": 693.48, "energy_reduction_percent": 96.77}
+    ],
+    "cuda_w8a32": [
+      {"prompt": 1, "serial_ttft_ms": 29.803, "batched_ttft_ms": 30.320, "speedup": 0.983, "serial_tok_s": 33.55, "batched_tok_s": 32.98, "energy_reduction_percent": -27.35},
+      {"prompt": 32, "serial_ttft_ms": 958.802, "batched_ttft_ms": 700.469, "speedup": 1.369, "serial_tok_s": 33.37, "batched_tok_s": 45.68, "energy_reduction_percent": 28.71},
+      {"prompt": 128, "serial_ttft_ms": 3859.673, "batched_ttft_ms": 2794.245, "speedup": 1.381, "serial_tok_s": 33.16, "batched_tok_s": 45.81, "energy_reduction_percent": 29.34},
+      {"prompt": 512, "serial_ttft_ms": 15871.716, "batched_ttft_ms": 11447.732, "speedup": 1.386, "serial_tok_s": 32.26, "batched_tok_s": 44.73, "energy_reduction_percent": 29.52}
+    ]
+  },
+  "workspace": {
+    "serial_mib": 0.66,
+    "batched_mib": 38.41,
+    "increment_mib": 37.75,
+    "configured_max_sequence_length": 512
+  },
+  "nsight": {
+    "prompt_tokens": 32,
+    "linear_serial": {"kind": "GEMV", "instances": 5376},
+    "linear_batched": {"kind": "GEMM", "instances": 168},
+    "lm_head_instances": {"serial": 32, "batched": 1},
+    "argmax_instances": {"serial": 32, "batched": 1},
+    "attention_launches": {"serial": 768, "batched": 24},
+    "kernel_launches": {"serial": 12416, "batched_custom_or_w8a32": 460, "batched_cublas": 556},
+    "cuda_launch_api_time_ms": {"fp32_serial": 156.028, "w8a32_serial": 158.579, "fp32_custom": 5.201, "w8a32_batched": 4.707, "fp32_cublas": 13.936},
+    "prefill_cuda_malloc_calls": 0,
+    "prefill_cuda_free_calls": 0,
+    "batched_h2d": {"count": 1, "bytes": 128},
+    "batched_d2h": {"count": 1, "bytes": 4},
+    "trace_sha256": {
+      "cuda_fp32_serial": "bd3d8df67c0633f8ff3340714b545452b2f1a29da2a13c0111b322cf733e765b",
+      "cuda_fp32_batched_custom": "98922cb964988adcceac63c86acf86a855594dad9755246788350e69409bb7b9",
+      "cuda_fp32_batched_cublas": "14243437baad8a22a62324fd7814965ec81d408cfaf2db236cf17ed7eedb4525",
+      "cuda_w8a32_serial": "068d3fb9330ea24f744047351da69a7c35e2573c0d9ad537660fc8d6ea07c85f",
+      "cuda_w8a32_batched": "da81867c68e6a0feae86b020b2c5b977a2f12753bfbfb19c9a43c6b557884839"
+    }
+  },
+  "acceptance": {
+    "batched_faster_at_32_128_512": true,
+    "all_ttft_cv_le_3_percent": true,
+    "gemv_changed_to_gemm": true,
+    "lm_head_once_per_prompt": true,
+    "no_prefill_cuda_allocations": true,
+    "single_prompt_h2d": true,
+    "kv_decode_continuity": true
+  },
+  "artifacts": {
+    "raw_benchmarks": "results/codex-cp08-*-5x20.json",
+    "raw_nsys": "profiles/codex-cp08-cuda-*.nsys-rep",
+    "report": "docs/codex-cp08-prefill-benefit-validation.md"
+  },
+  "notes": [
+    "Nsight durations include profiler overhead and are not used as formal benchmark latency.",
+    "The A16 path remains BF16 and is outside this checkpoint."
+  ]
+}
