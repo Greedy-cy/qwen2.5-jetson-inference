@@ -1,0 +1,13 @@
+build/
+.cache/
+.venv/
+models/
+artifacts/
+results/
+profiles/
+*.nsys-rep
+*.sqlite
+__pycache__/
+*.pyc
+.idea/
+.vscode/

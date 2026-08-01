@@ -1,0 +1,283 @@
+#include "infer/qwen2.hpp"
+#include "infer/tokenizer.hpp"
+
+#include <cstdlib>
+#include <iomanip>
+#include <nlohmann/json.hpp>
+
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
+
+namespace {
+
+using infer::Device;
+using infer::Precision;
+
+class Arguments {
+ public:
+  Arguments(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) values_.emplace_back(argv[i]);
+  }
+  std::string command() const { return values_.empty() ? "help" : values_[0]; }
+  bool has(std::string_view key) const {
+    return std::find(values_.begin(), values_.end(), key) != values_.end();
+  }
+  std::string get(std::string_view key, std::string fallback = {}) const {
+    for (size_t i = 0; i + 1 < values_.size(); ++i) {
+      if (values_[i] == key) return values_[i + 1];
+    }
+    return fallback;
+  }
+  int get_int(std::string_view key, int fallback) const {
+    const auto text = get(key);
+    return text.empty() ? fallback : std::stoi(text);
+  }
+ private:
+  std::vector<std::string> values_;
+};
+
+void usage() {
+  std::cout <<
+      "Qwen2.5 C++/CUDA inference\n\n"
+      "Usage:\n"
+      "  llm_infer generate --model DIR --prompt TEXT [--backend cpu|cuda]\n"
+      "                     [--precision fp32|int8] [--max-new-tokens 128]\n"
+      "                     [--max-seq-len 2048] [--system TEXT] [--raw] [--cublas]\n"
+      "  llm_infer benchmark --model DIR --prompt TEXT [--warmup 5] [--repeat 20]\n"
+      "                      [--json FILE] [other generation options]\n"
+      "  llm_infer inspect --model DIR [--precision fp32|int8] [--max-seq-len 2048]\n"
+      "  llm_infer tokenize --model DIR --text TEXT [--chat]\n"
+      "  llm_infer logits --model DIR (--prompt TEXT | --token-ids CSV) --output FILE\n";
+}
+
+Device parse_device(const std::string& text) {
+  if (text == "cpu") return Device::kCpu;
+  if (text == "cuda") return Device::kCuda;
+  throw infer::Error("backend must be cpu or cuda");
+}
+
+Precision parse_precision(const std::string& text) {
+  if (text == "fp32") return Precision::kFloat32;
+  if (text == "int8") return Precision::kInt8;
+  throw infer::Error("precision must be fp32 or int8");
+}
+
+infer::RuntimeOptions runtime_options(const Arguments& args) {
+  infer::RuntimeOptions options;
+  options.backend = parse_device(args.get("--backend", "cuda"));
+  options.precision = parse_precision(args.get("--precision", "fp32"));
+  options.max_sequence_length = args.get_int("--max-seq-len", 2048);
+  options.use_cublas_gemv = args.has("--cublas");
+  return options;
+}
+
+std::vector<int> make_prompt(const Arguments& args, const infer::QwenTokenizer& tokenizer) {
+  const std::string prompt = args.get("--prompt");
+  if (prompt.empty()) throw infer::Error("--prompt is required");
+  const std::string formatted = args.has("--raw")
+      ? prompt
+      : tokenizer.apply_chat_template(prompt,
+            args.get("--system", "You are a helpful assistant."));
+  return tokenizer.encode(formatted, true);
+}
+
+std::vector<int> parse_token_ids(const std::string& text) {
+  std::vector<int> ids;
+  std::stringstream stream(text);
+  std::string item;
+  while (std::getline(stream, item, ',')) {
+    if (!item.empty()) ids.push_back(std::stoi(item));
+  }
+  if (ids.empty()) throw infer::Error("--token-ids must contain at least one id");
+  return ids;
+}
+
+double percentile(std::vector<double> values, double p) {
+  if (values.empty()) return 0.0;
+  std::sort(values.begin(), values.end());
+  const size_t index = static_cast<size_t>(std::ceil(p * values.size())) - 1;
+  return values[std::min(index, values.size() - 1)];
+}
+
+long peak_rss_kib() {
+#ifndef _WIN32
+  rusage usage{};
+  if (getrusage(RUSAGE_SELF, &usage) == 0) return usage.ru_maxrss;
+#endif
+  return 0;
+}
+
+nlohmann::json memory_size(size_t bytes) {
+  constexpr double kBytesPerMib = 1024.0 * 1024.0;
+  const double mib = static_cast<double>(bytes) / kBytesPerMib;
+  const double rounded_mib = std::round(mib * 100.0) / 100.0;
+  return {{"bytes", bytes}, {"mib", rounded_mib}};
+}
+
+std::string environment_value(const char* name) {
+  const char* value = std::getenv(name);
+  return value != nullptr && value[0] != '\0' ? value : "library_default";
+}
+
+void inspect(const Arguments& args) {
+  const std::filesystem::path directory = args.get("--model");
+  if (directory.empty()) throw infer::Error("--model is required");
+  const auto precision = parse_precision(args.get("--precision", "fp32"));
+  const auto config = infer::ModelConfig::load(directory / "config.json");
+  const auto archive_path = directory /
+      (precision == Precision::kFloat32 ? "model.fp32.qbin" : "model.int8.qbin");
+  infer::ModelArchive archive(archive_path);
+  size_t quantized = 0;
+  size_t payload = 0;
+  for (const auto& rec : archive.records()) {
+    payload += rec.nbytes;
+    if (rec.dtype == infer::DType::kInt8) ++quantized;
+  }
+  const int max_seq = args.get_int("--max-seq-len", 2048);
+  const size_t kv_bytes = 2ULL * config.num_layers * config.num_kv_heads * max_seq *
+                          config.head_dim() * sizeof(float);
+  std::cout << "archive: " << archive_path << '\n'
+            << "layers: " << config.num_layers << ", hidden: " << config.hidden_size
+            << ", intermediate: " << config.intermediate_size << '\n'
+            << "heads: " << config.num_heads << " Q / " << config.num_kv_heads
+            << " KV, head_dim: " << config.head_dim() << '\n'
+            << "vocab: " << config.vocab_size << '\n'
+            << "tensors: " << archive.records().size() << " (int8: " << quantized << ")\n"
+            << "payload MiB: " << std::fixed << std::setprecision(2)
+            << payload / 1048576.0 << '\n'
+            << "KV cache MiB @ " << max_seq << ": " << kv_bytes / 1048576.0 << '\n';
+}
+
+void tokenize(const Arguments& args) {
+  const std::filesystem::path directory = args.get("--model");
+  if (directory.empty()) throw infer::Error("--model is required");
+  std::string text = args.get("--text");
+  if (text.empty()) throw infer::Error("--text is required");
+  infer::QwenTokenizer tokenizer(directory / "tokenizer.json");
+  if (args.has("--chat")) text = tokenizer.apply_chat_template(text);
+  const auto ids = tokenizer.encode(text, true);
+  nlohmann::json report{{"text", text}, {"ids", ids}, {"decoded", tokenizer.decode(ids)}};
+  std::cout << report.dump(2) << '\n';
+}
+
+void generate(const Arguments& args) {
+  const std::filesystem::path directory = args.get("--model");
+  if (directory.empty()) throw infer::Error("--model is required");
+  infer::QwenTokenizer tokenizer(directory / "tokenizer.json");
+  const auto prompt = make_prompt(args, tokenizer);
+  infer::Qwen2Model model(directory, runtime_options(args));
+  const auto result = model.generate(prompt, args.get_int("--max-new-tokens", 128));
+  std::cout << tokenizer.decode(result.tokens, true) << "\n\n"
+            << "[prompt=" << result.stats.prompt_tokens
+            << ", generated=" << result.stats.generated_tokens
+            << ", ttft_ms=" << std::fixed << std::setprecision(2) << result.stats.ttft_ms
+            << ", decode_tok/s=" << result.stats.decode_tokens_per_second()
+            << ", total_ms=" << result.stats.total_ms << "]\n";
+  if (args.has("--show-token-ids")) {
+    std::cout << nlohmann::json(result.tokens).dump() << '\n';
+  }
+}
+
+void logits(const Arguments& args) {
+  const std::filesystem::path directory = args.get("--model");
+  const std::filesystem::path output_path = args.get("--output");
+  if (directory.empty() || output_path.empty()) throw infer::Error("--model and --output are required");
+  infer::QwenTokenizer tokenizer(directory / "tokenizer.json");
+  const auto token_ids = args.get("--token-ids");
+  const auto prompt = token_ids.empty() ? make_prompt(args, tokenizer) : parse_token_ids(token_ids);
+  infer::Qwen2Model model(directory, runtime_options(args));
+  int top1 = -1;
+  for (size_t i = 0; i < prompt.size(); ++i) top1 = model.forward_token(prompt[i], static_cast<int>(i));
+  const auto values = model.last_logits_host();
+  std::filesystem::create_directories(output_path.parent_path());
+  std::ofstream output(output_path, std::ios::binary);
+  output.write(reinterpret_cast<const char*>(values.data()),
+               static_cast<std::streamsize>(values.size() * sizeof(float)));
+  INFER_CHECK(output.good(), "failed to write logits file");
+  std::cout << "top1=" << top1 << " logits=" << values.size()
+            << " output=" << output_path << '\n';
+}
+
+void benchmark(const Arguments& args) {
+  const std::filesystem::path directory = args.get("--model");
+  if (directory.empty()) throw infer::Error("--model is required");
+  infer::QwenTokenizer tokenizer(directory / "tokenizer.json");
+  const auto prompt = make_prompt(args, tokenizer);
+  const auto options = runtime_options(args);
+  infer::Qwen2Model model(directory, options);
+  const int new_tokens = args.get_int("--max-new-tokens", 128);
+  const int warmup = args.get_int("--warmup", 5);
+  const int repeat = args.get_int("--repeat", 20);
+  if (warmup < 0 || repeat <= 0) throw infer::Error("warmup must be >= 0 and repeat must be > 0");
+  for (int i = 0; i < warmup; ++i) model.generate(prompt, new_tokens, false);
+  std::vector<double> totals;
+  std::vector<double> ttfts;
+  std::vector<double> throughputs;
+  std::vector<int> generated_counts;
+  for (int i = 0; i < repeat; ++i) {
+    const auto result = model.generate(prompt, new_tokens, false);
+    totals.push_back(result.stats.total_ms);
+    ttfts.push_back(result.stats.ttft_ms);
+    throughputs.push_back(result.stats.decode_tokens_per_second());
+    generated_counts.push_back(result.stats.generated_tokens);
+  }
+  const double mean_total = std::accumulate(totals.begin(), totals.end(), 0.0) / totals.size();
+  const double mean_ttft = std::accumulate(ttfts.begin(), ttfts.end(), 0.0) / ttfts.size();
+  const double mean_throughput =
+      std::accumulate(throughputs.begin(), throughputs.end(), 0.0) / throughputs.size();
+  const long peak_rss = peak_rss_kib();
+  const size_t peak_rss_bytes =
+      peak_rss > 0 ? static_cast<size_t>(peak_rss) * 1024ULL : 0;
+  nlohmann::json report{
+      {"configuration",
+       {{"backend", infer::to_string(options.backend)},
+        {"precision", infer::to_string(options.precision)},
+        {"warmup", warmup},
+        {"repeat", repeat},
+        {"threading",
+         {{"openblas_num_threads_env", environment_value("OPENBLAS_NUM_THREADS")},
+          {"omp_num_threads_env", environment_value("OMP_NUM_THREADS")}}}}},
+      {"tokens",
+       {{"prompt", prompt.size()},
+        {"max_new", new_tokens},
+        {"generated", generated_counts.empty() ? 0 : generated_counts.front()}}},
+      {"latency_ms",
+       {{"ttft_mean", mean_ttft},
+        {"total_mean", mean_total},
+        {"total_p50", percentile(totals, 0.50)},
+        {"total_p95", percentile(totals, 0.95)}}},
+      {"throughput_tokens_per_second", {{"decode_mean", mean_throughput}}},
+      {"memory",
+       {{"peak_rss", memory_size(peak_rss_bytes)},
+        {"model_archive", memory_size(model.archive().mapped_bytes())},
+        {"device_weights", memory_size(model.device_weight_bytes())},
+        {"workspace", memory_size(model.workspace_bytes())},
+        {"kv_cache", memory_size(model.kv_cache_bytes())}}}};
+  std::cout << report.dump(2) << '\n';
+  const auto json_path = args.get("--json");
+  if (!json_path.empty()) {
+    const auto parent = std::filesystem::path(json_path).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent);
+    std::ofstream output(json_path);
+    output << report.dump(2) << '\n';
+  }
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  try {
+    const Arguments args(argc, argv);
+    if (args.command() == "generate") generate(args);
+    else if (args.command() == "benchmark") benchmark(args);
+    else if (args.command() == "inspect") inspect(args);
+    else if (args.command() == "tokenize") tokenize(args);
+    else if (args.command() == "logits") logits(args);
+    else { usage(); return args.command() == "help" ? 0 : 1; }
+    return 0;
+  } catch (const std::exception& error) {
+    std::cerr << "error: " << error.what() << '\n';
+    return 2;
+  }
+}
