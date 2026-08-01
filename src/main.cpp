@@ -113,6 +113,7 @@ nlohmann::json summarize(const std::vector<double>& values) {
   const double stddev = std::sqrt(variance);
   return {
       {"mean", mean},
+      {"p05", percentile(values, 0.05)},
       {"p50", percentile(values, 0.50)},
       {"p95", percentile(values, 0.95)},
       {"min", *std::min_element(values.begin(), values.end())},

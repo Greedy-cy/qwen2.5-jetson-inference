@@ -70,6 +70,7 @@ def summarize_values(values: list[float]) -> dict[str, float]:
     stddev = statistics.pstdev(values)
     return {
         "mean": mean,
+        "p05": percentile(values, 0.05),
         "p50": percentile(values, 0.50),
         "p95": percentile(values, 0.95),
         "min": min(values),
@@ -321,7 +322,7 @@ def collect_provenance(root: Path, model: Path, precision: str) -> dict[str, Any
 
 def self_test() -> None:
     summary = summarize_values([1.0, 2.0, 3.0, 4.0])
-    assert summary["mean"] == 2.5 and summary["p95"] == 4.0
+    assert summary["mean"] == 2.5 and summary["p05"] == 1.0 and summary["p95"] == 4.0
     sample = parse_tegrastats_line(
         "RAM 2048/7620MB GR3D_FREQ 75%@[612] VDD_IN 5000mW/4800mW cpu@45.5C", 1.0
     )
