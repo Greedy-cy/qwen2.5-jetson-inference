@@ -173,6 +173,17 @@ class ClockGuard:
                 )
             except RuntimeError as error:
                 print(f"warning: failed to restore clocks: {error}", file=sys.stderr)
+            finally:
+                try:
+                    run_text(
+                        ["sudo", "-n", "rm", "-f", str(self.state_file)],
+                        check=True,
+                    )
+                except RuntimeError as error:
+                    print(
+                        f"warning: failed to remove clock state file: {error}",
+                        file=sys.stderr,
+                    )
 
 
 def run_benchmark_process(command: list[str]) -> tuple[dict[str, Any], dict[str, float], str]:
