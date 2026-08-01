@@ -44,6 +44,7 @@ void usage() {
       "  llm_infer generate --model DIR --prompt TEXT [--backend cpu|cuda]\n"
       "                     [--precision fp32|int8] [--max-new-tokens 128]\n"
       "                     [--max-seq-len 2048] [--system TEXT] [--raw] [--cublas]\n"
+      "                     [--prefill-mode auto|serial|batched]\n"
       "  llm_infer benchmark --model DIR (--prompt TEXT | --token-ids CSV)\n"
       "                      [--warmup 5] [--repeat 20] [--json FILE]\n"
       "                      [--telemetry-markers] [other generation options]\n"
@@ -70,6 +71,7 @@ infer::RuntimeOptions runtime_options(const Arguments& args) {
   options.precision = parse_precision(args.get("--precision", "fp32"));
   options.max_sequence_length = args.get_int("--max-seq-len", 2048);
   options.use_cublas_gemv = args.has("--cublas");
+  options.prefill_mode = infer::parse_prefill_mode(args.get("--prefill-mode", "auto"));
   return options;
 }
 
@@ -210,8 +212,8 @@ void logits(const Arguments& args) {
   const auto token_ids = args.get("--token-ids");
   const auto prompt = token_ids.empty() ? make_prompt(args, tokenizer) : parse_token_ids(token_ids);
   infer::Qwen2Model model(directory, runtime_options(args));
-  int top1 = -1;
-  for (size_t i = 0; i < prompt.size(); ++i) top1 = model.forward_token(prompt[i], static_cast<int>(i));
+  model.reset();
+  const int top1 = model.prefill(prompt);
   const auto values = model.last_logits_host();
   std::filesystem::create_directories(output_path.parent_path());
   std::ofstream output(output_path, std::ios::binary);
@@ -295,7 +297,8 @@ void benchmark(const Arguments& args) {
         {"batch_size", 1},
         {"decoding", "greedy_argmax"},
         {"early_stop", false},
-        {"prefill_mode", "serial_legacy"},
+        {"prefill_mode", infer::to_string(options.prefill_mode)},
+        {"effective_prefill_mode", infer::to_string(model.effective_prefill_mode(prompt.size()))},
         {"max_sequence_length", options.max_sequence_length},
         {"use_cublas_gemv", options.use_cublas_gemv},
         {"warmup", warmup},

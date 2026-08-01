@@ -69,6 +69,7 @@ taskset -c 0 python3 tools/run_benchmark.py \
   --binary build/llm_infer \
   --model models/qwen2.5-0.5b-instruct \
   --backend cpu --precision fp32 \
+  --prefill-mode serial \
   --max-new-tokens 128 --max-seq-len 256 \
   --warmup 1 --repeat 5 --telemetry-interval-ms 100 \
   --lock-clocks --output results/cpu-fp32-1thread-serial.json
@@ -80,6 +81,7 @@ taskset -c 0-5 python3 tools/run_benchmark.py \
   --binary build/llm_infer \
   --model models/qwen2.5-0.5b-instruct \
   --backend cpu --precision fp32 \
+  --prefill-mode serial \
   --max-new-tokens 128 --max-seq-len 256 \
   --warmup 5 --repeat 20 --telemetry-interval-ms 100 \
   --lock-clocks --output results/cpu-fp32-6threads-serial.json

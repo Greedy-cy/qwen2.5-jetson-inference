@@ -303,7 +303,50 @@ void Qwen2Model::synchronize() const {
   if (cuda_context_) cuda_context_->synchronize();
 }
 
-void Qwen2Model::reset() { position_ = 0; }
+void Qwen2Model::reset() {
+  position_ = 0;
+  has_prefilled_ = false;
+}
+
+PrefillMode Qwen2Model::effective_prefill_mode(size_t prompt_tokens) const {
+  INFER_CHECK(prompt_tokens > 0, "prompt must contain at least one token");
+  // Checkpoint 5 only splits the state machine. Batched kernels arrive later.
+  if (options_.prefill_mode == PrefillMode::kAuto) return PrefillMode::kSerial;
+  return options_.prefill_mode;
+}
+
+int Qwen2Model::prefill(const std::vector<int>& prompt_tokens) {
+  INFER_CHECK(!prompt_tokens.empty(), "prompt must contain at least one token");
+  INFER_CHECK(position_ == 0 && !has_prefilled_,
+              "prefill requires a fresh model state; call reset first");
+  INFER_CHECK(prompt_tokens.size() <= static_cast<size_t>(options_.max_sequence_length),
+              "prompt exceeds KV cache capacity");
+  for (const int token : prompt_tokens) {
+    INFER_CHECK(token >= 0 && token < config_.vocab_size, "input token out of range");
+  }
+
+  const PrefillMode mode = effective_prefill_mode(prompt_tokens.size());
+  INFER_CHECK(mode == PrefillMode::kSerial,
+              "batched prefill is not implemented in checkpoint 5");
+
+  ProfileRange range("qwen2.prefill");
+  int next = 0;
+  for (const int token : prompt_tokens) {
+    next = forward_token(token, position_);
+    ++position_;
+  }
+  has_prefilled_ = true;
+  return next;
+}
+
+int Qwen2Model::decode_next(int token) {
+  INFER_CHECK(has_prefilled_, "decode_next requires a successful prefill");
+  INFER_CHECK(position_ < options_.max_sequence_length, "KV cache capacity exceeded");
+  ProfileRange range("qwen2.decode_next");
+  const int next = forward_token(token, position_);
+  ++position_;
+  return next;
+}
 
 GenerationResult Qwen2Model::generate(const std::vector<int>& prompt_tokens,
                                       int max_new_tokens, bool stop_on_eos) {
@@ -316,21 +359,17 @@ GenerationResult Qwen2Model::generate(const std::vector<int>& prompt_tokens,
   GenerationResult result;
   result.stats.prompt_tokens = static_cast<int>(prompt_tokens.size());
   WallTimer total;
-  WallTimer prefill;
-  int next = 0;
-  {
-    ProfileRange range("qwen2.prefill");
-    for (const int token : prompt_tokens) next = forward_token(token, position_++);
-  }
+  WallTimer prefill_timer;
+  int next = prefill(prompt_tokens);
   synchronize();
-  result.stats.ttft_ms = prefill.elapsed_ms();
+  result.stats.ttft_ms = prefill_timer.elapsed_ms();
   if (max_new_tokens > 0) result.tokens.push_back(next);
   WallTimer decode;
   {
     ProfileRange range("qwen2.decode");
     while (static_cast<int>(result.tokens.size()) < max_new_tokens &&
            (!stop_on_eos || result.tokens.back() != config_.eos_token_id)) {
-      next = forward_token(result.tokens.back(), position_++);
+      next = decode_next(result.tokens.back());
       result.tokens.push_back(next);
     }
   }

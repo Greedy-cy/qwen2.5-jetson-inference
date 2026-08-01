@@ -353,6 +353,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token-ids", default=",".join(map(str, CANONICAL_TOKEN_IDS)))
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--max-seq-len", type=int, default=256)
+    parser.add_argument("--prefill-mode", choices=("auto", "serial", "batched"), default="auto")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--repeat", type=int, default=20)
     parser.add_argument("--output", type=Path)
@@ -387,6 +388,7 @@ def main() -> None:
         "--token-ids", args.token_ids,
         "--max-new-tokens", str(args.max_new_tokens),
         "--max-seq-len", str(args.max_seq_len),
+        "--prefill-mode", args.prefill_mode,
         "--warmup", str(args.warmup), "--repeat", str(args.repeat),
         "--telemetry-markers",
     ]

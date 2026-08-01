@@ -12,6 +12,7 @@ struct RuntimeOptions {
   Precision precision{Precision::kFloat32};
   int max_sequence_length{2048};
   bool use_cublas_gemv{false};
+  PrefillMode prefill_mode{PrefillMode::kAuto};
 };
 
 struct GenerationStats {
@@ -41,6 +42,8 @@ class Qwen2Model {
 
   GenerationResult generate(const std::vector<int>& prompt_tokens, int max_new_tokens,
                             bool stop_on_eos = true);
+  int prefill(const std::vector<int>& prompt_tokens);
+  int decode_next(int token);
   int forward_token(int token, int position);
   std::vector<float> last_logits_host() const;
   void reset();
@@ -48,6 +51,9 @@ class Qwen2Model {
   const ModelConfig& config() const { return config_; }
   const ModelArchive& archive() const { return archive_; }
   const RuntimeOptions& options() const { return options_; }
+  PrefillMode effective_prefill_mode(size_t prompt_tokens) const;
+  int position() const { return position_; }
+  bool has_prefilled() const { return has_prefilled_; }
   size_t workspace_bytes() const { return workspace_.bytes(); }
   size_t kv_cache_bytes() const { return kv_cache_.bytes(); }
   size_t device_weight_bytes() const { return device_weights_.bytes(); }
@@ -90,6 +96,7 @@ class Qwen2Model {
   float* logits_{nullptr};
   float* attention_scores_{nullptr};
   int position_{0};
+  bool has_prefilled_{false};
 };
 
 }  // namespace infer

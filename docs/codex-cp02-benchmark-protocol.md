@@ -65,6 +65,7 @@ sudo -v
 python3 tools/run_benchmark.py \
   --model models/qwen2.5-0.5b-instruct \
   --backend cuda --precision fp32 \
+  --prefill-mode serial \
   --lock-clocks \
   --output results/cuda-fp32-serial.json
 ```
@@ -85,6 +86,7 @@ OPENBLAS_NUM_THREADS=6 OMP_NUM_THREADS=6 taskset -c 0-5 \
 python3 tools/run_benchmark.py \
   --model models/qwen2.5-0.5b-instruct \
   --backend cpu --precision fp32 \
+  --prefill-mode serial \
   --lock-clocks \
   --output results/cpu-fp32-6threads-serial.json
 ```

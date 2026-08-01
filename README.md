@@ -84,6 +84,8 @@ flowchart LR
 每个 decoder layer 执行 `RMSNorm → Q/K/V → RoPE → GQA → O projection → residual
 → RMSNorm → SwiGLU MLP → residual`。prefill 与 decode 共用完全相同的数学路径；当前
 prefill 以 token 为单位执行，便于逐层核对，后续性能版本会增加矩阵化 prefill。
+独立 `prefill()/decode_next()` 状态机及当前模式语义见
+[`CODEX-CP05`](docs/codex-cp05-prefill-decode-state-machine.md)。
 
 ## 模型文件
 

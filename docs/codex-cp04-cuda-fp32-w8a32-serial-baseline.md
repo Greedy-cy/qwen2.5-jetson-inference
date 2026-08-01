@@ -119,6 +119,7 @@ taskset -c 0-5 python3 tools/run_benchmark.py \
   --binary build/llm_infer \
   --model models/qwen2.5-0.5b-instruct \
   --backend cuda --precision fp32 \
+  --prefill-mode serial \
   --max-new-tokens 128 --max-seq-len 256 \
   --warmup 5 --repeat 20 --telemetry-interval-ms 100 \
   --lock-clocks --output results/cuda-fp32-serial.json

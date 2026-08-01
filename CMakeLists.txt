@@ -62,7 +62,11 @@ if(INFER_BUILD_TESTS)
     GIT_SHALLOW TRUE)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
-  add_executable(infer_tests tests/test_core.cpp tests/test_ops.cpp tests/test_cuda.cpp)
+  add_executable(infer_tests
+    tests/test_core.cpp
+    tests/test_ops.cpp
+    tests/test_cuda.cpp
+    tests/test_qwen2.cpp)
   target_link_libraries(infer_tests PRIVATE infer_core GTest::gtest_main)
   include(GoogleTest)
   gtest_discover_tests(infer_tests)
