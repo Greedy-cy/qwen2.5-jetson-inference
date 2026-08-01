@@ -42,12 +42,12 @@ void usage() {
       "Qwen2.5 C++/CUDA inference\n\n"
       "Usage:\n"
       "  llm_infer generate --model DIR --prompt TEXT [--backend cpu|cuda]\n"
-      "                     [--precision fp32|w8a32] [--max-new-tokens 128]\n"
+      "                     [--precision fp32|w8a32|w16a16] [--max-new-tokens 128]\n"
       "                     [--max-seq-len 2048] [--system TEXT] [--raw] [--cublas]\n"
       "  llm_infer benchmark --model DIR (--prompt TEXT | --token-ids CSV)\n"
       "                      [--warmup 5] [--repeat 20] [--json FILE]\n"
       "                      [--telemetry-markers] [other generation options]\n"
-      "  llm_infer inspect --model DIR [--precision fp32|w8a32] [--max-seq-len 2048]\n"
+      "  llm_infer inspect --model DIR [--precision fp32|w8a32|w16a16] [--max-seq-len 2048]\n"
       "  llm_infer tokenize --model DIR --text TEXT [--chat]\n"
       "  llm_infer logits --model DIR (--prompt TEXT | --token-ids CSV) --output FILE\n";
 }
@@ -60,8 +60,10 @@ Device parse_device(const std::string& text) {
 
 Precision parse_precision(const std::string& text) {
   if (text == "fp32") return Precision::kFloat32;
-  if (text == "w8a32" || text == "int8") return Precision::kInt8;
-  throw infer::Error("precision must be fp32 or w8a32 (int8 is an alias)");
+  if (text == "w8a32" || text == "int8") return Precision::kW8A32;
+  if (text == "w16a16") return Precision::kW16A16;
+  throw infer::Error(
+      "precision must be fp32, w8a32, or w16a16 (int8 is a w8a32 alias)");
 }
 
 infer::RuntimeOptions runtime_options(const Arguments& args) {
@@ -148,25 +150,30 @@ void inspect(const Arguments& args) {
   if (directory.empty()) throw infer::Error("--model is required");
   const auto precision = parse_precision(args.get("--precision", "fp32"));
   const auto config = infer::ModelConfig::load(directory / "config.json");
-  const auto archive_path = directory /
-      (precision == Precision::kFloat32 ? "model.fp32.qbin" : "model.int8.qbin");
+  const auto archive_path = directory / infer::archive_filename(precision);
   infer::ModelArchive archive(archive_path);
   size_t quantized = 0;
+  size_t bfloat16 = 0;
   size_t payload = 0;
   for (const auto& rec : archive.records()) {
     payload += rec.nbytes;
     if (rec.dtype == infer::DType::kInt8) ++quantized;
+    if (rec.dtype == infer::DType::kBFloat16) ++bfloat16;
   }
   const int max_seq = args.get_int("--max-seq-len", 2048);
+  const auto kv_dtype = precision == Precision::kW16A16
+                            ? infer::DType::kBFloat16
+                            : infer::DType::kFloat32;
   const size_t kv_bytes = 2ULL * config.num_layers * config.num_kv_heads * max_seq *
-                          config.head_dim() * sizeof(float);
+                          config.head_dim() * infer::dtype_size(kv_dtype);
   std::cout << "archive: " << archive_path << '\n'
             << "layers: " << config.num_layers << ", hidden: " << config.hidden_size
             << ", intermediate: " << config.intermediate_size << '\n'
             << "heads: " << config.num_heads << " Q / " << config.num_kv_heads
             << " KV, head_dim: " << config.head_dim() << '\n'
             << "vocab: " << config.vocab_size << '\n'
-            << "tensors: " << archive.records().size() << " (int8: " << quantized << ")\n"
+            << "tensors: " << archive.records().size() << " (int8: " << quantized
+            << ", bfloat16: " << bfloat16 << ")\n"
             << "payload MiB: " << std::fixed << std::setprecision(2)
             << payload / 1048576.0 << '\n'
             << "KV cache MiB @ " << max_seq << ": " << kv_bytes / 1048576.0 << '\n';

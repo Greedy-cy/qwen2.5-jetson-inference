@@ -74,4 +74,6 @@ if(INFER_BUILD_TESTS)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME BenchmarkRunner.SchemaSmoke
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/run_benchmark.py --self-test)
+  add_test(NAME ExportModel.BFloat16SelfTest
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/export_model.py --self-test)
 endif()

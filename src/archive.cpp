@@ -103,8 +103,15 @@ void ModelArchive::open(const std::filesystem::path& path) {
     rec.name = item.at("name").get<std::string>();
     rec.shape = item.at("shape").get<Shape>();
     const auto dtype = item.at("dtype").get<std::string>();
-    rec.dtype = dtype == "float32" ? DType::kFloat32 : DType::kInt8;
-    INFER_CHECK(dtype == "float32" || dtype == "int8", "unsupported archive dtype");
+    if (dtype == "float32") {
+      rec.dtype = DType::kFloat32;
+    } else if (dtype == "bfloat16") {
+      rec.dtype = DType::kBFloat16;
+    } else if (dtype == "int8") {
+      rec.dtype = DType::kInt8;
+    } else {
+      throw Error("unsupported archive dtype: " + dtype);
+    }
     rec.offset = item.at("offset").get<uint64_t>();
     rec.nbytes = item.at("nbytes").get<uint64_t>();
     INFER_CHECK(rec.nbytes == numel(rec.shape) * dtype_size(rec.dtype),

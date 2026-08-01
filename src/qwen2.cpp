@@ -39,9 +39,9 @@ Qwen2Model::Qwen2Model(const std::filesystem::path& model_directory,
                        RuntimeOptions options)
     : options_(options),
       config_(ModelConfig::load(model_directory / "config.json")),
-      archive_(model_directory /
-               (options.precision == Precision::kFloat32 ? "model.fp32.qbin"
-                                                          : "model.int8.qbin")) {
+      archive_(model_directory / archive_filename(options.precision)) {
+  INFER_CHECK(options_.precision != Precision::kW16A16,
+              "W16A16 uses BF16; archive support is ready but BF16 runtime kernels are not implemented");
   INFER_CHECK(options_.max_sequence_length > 0, "max sequence length must be positive");
   INFER_CHECK(options_.max_sequence_length <= config_.max_position_embeddings,
               "max sequence length exceeds model limit");

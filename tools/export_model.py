@@ -26,6 +26,7 @@ VERSION = 1
 DATA_OFFSET = 1024 * 1024
 FILE_HEADER = struct.Struct("<8sIIQQ")
 ALIGNMENT = 256
+DTYPE_BYTES = {"float32": 4, "bfloat16": 2, "int8": 1}
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,93 @@ def digest(array: np.ndarray) -> str:
     return hashlib.sha256(memoryview(np.ascontiguousarray(array)).cast("B")).hexdigest()
 
 
+def sha256_file(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
+
+
+def float32_to_bfloat16(array: np.ndarray) -> np.ndarray:
+    values = np.ascontiguousarray(array, dtype=np.float32)
+    bits = values.view(np.uint32)
+    rounding_bias = np.uint32(0x7FFF) + ((bits >> 16) & np.uint32(1))
+    result = ((bits + rounding_bias) >> 16).astype("<u2")
+    nan_mask = np.isnan(values)
+    if np.any(nan_mask):
+        result[nan_mask] = ((bits[nan_mask] >> 16) | np.uint32(0x0040)).astype("<u2")
+    return result
+
+
+def bfloat16_to_float32(array: np.ndarray) -> np.ndarray:
+    words = np.ascontiguousarray(array, dtype="<u2").astype(np.uint32)
+    return np.ascontiguousarray((words << 16).view(np.float32))
+
+
+def bfloat16_error(reference: np.ndarray, storage: np.ndarray) -> tuple[float, float]:
+    reconstructed = bfloat16_to_float32(storage).reshape(reference.shape)
+    finite = np.isfinite(reference)
+    if not np.any(finite):
+        return 0.0, 0.0
+    error = np.abs(reference[finite] - reconstructed[finite])
+    return float(error.max(initial=0.0)), float(error.mean(dtype=np.float64))
+
+
+def verify_archive(path: Path) -> dict:
+    with path.open("rb") as source:
+        mapping = mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            if len(mapping) < FILE_HEADER.size:
+                raise RuntimeError("archive is smaller than its fixed header")
+            magic, version, json_size, data_offset, _ = FILE_HEADER.unpack_from(mapping, 0)
+            if magic != MAGIC or version != VERSION:
+                raise RuntimeError("archive magic or version mismatch")
+            if FILE_HEADER.size + json_size > data_offset or data_offset >= len(mapping):
+                raise RuntimeError("archive metadata bounds are invalid")
+            metadata = json.loads(mapping[FILE_HEADER.size : FILE_HEADER.size + json_size])
+            names: set[str] = set()
+            dtype_counts = {name: 0 for name in DTYPE_BYTES}
+            payload_bytes = 0
+            for record in metadata["tensors"]:
+                name = record["name"]
+                if name in names:
+                    raise RuntimeError(f"duplicate tensor {name}")
+                names.add(name)
+                dtype = record["dtype"]
+                if dtype not in DTYPE_BYTES:
+                    raise RuntimeError(f"unsupported dtype {dtype} for {name}")
+                elements = 1
+                for dimension in record["shape"]:
+                    if dimension < 0:
+                        raise RuntimeError(f"negative dimension for {name}")
+                    elements *= dimension
+                expected = elements * DTYPE_BYTES[dtype]
+                if record["nbytes"] != expected:
+                    raise RuntimeError(f"nbytes mismatch for {name}")
+                if record["offset"] % ALIGNMENT != 0:
+                    raise RuntimeError(f"unaligned tensor {name}")
+                begin = data_offset + record["offset"]
+                end = begin + record["nbytes"]
+                if end > len(mapping):
+                    raise RuntimeError(f"tensor outside archive: {name}")
+                actual_sha256 = hashlib.sha256(mapping[begin:end]).hexdigest()
+                if actual_sha256 != record["sha256"]:
+                    raise RuntimeError(f"SHA-256 mismatch for {name}")
+                dtype_counts[dtype] += 1
+                payload_bytes += record["nbytes"]
+            return {
+                "metadata_precision": metadata["precision"],
+                "tensor_count": len(metadata["tensors"]),
+                "dtype_counts": dtype_counts,
+                "payload_bytes": payload_bytes,
+                "file_bytes": len(mapping),
+                "all_tensor_sha256_verified": True,
+            }
+        finally:
+            mapping.close()
+
+
 def write_tensor(output, records: list[dict], name: str, array: np.ndarray,
                  dtype: str, quant: dict | None = None) -> None:
     array = np.ascontiguousarray(array)
@@ -163,13 +251,27 @@ def export(source: Path, destination: Path, precision: str, group_size: int) -> 
     destination.parent.mkdir(parents=True, exist_ok=True)
     records: list[dict] = []
     quantization: list[dict] = []
+    bfloat16_conversion: list[dict] = []
     try:
         with destination.open("w+b") as output:
             output.truncate(DATA_OFFSET)
             output.seek(DATA_OFFSET)
             for index, tensor in enumerate(tensors, 1):
                 array = readers[tensor.path].array(tensor)
-                if precision == "int8" and should_quantize(tensor.name, array):
+                if precision == "w16a16":
+                    storage = float32_to_bfloat16(array)
+                    max_error, mean_error = bfloat16_error(array, storage)
+                    write_tensor(
+                        output, records, tensor.name, storage, "bfloat16"
+                    )
+                    bfloat16_conversion.append(
+                        {
+                            "name": tensor.name,
+                            "max_abs_error": max_error,
+                            "mean_abs_error": mean_error,
+                        }
+                    )
+                elif precision == "int8" and should_quantize(tensor.name, array):
                     q, scales, max_error, mean_error = quantize_groupwise(array, group_size)
                     scale_name = tensor.name + ".scale"
                     write_tensor(
@@ -215,11 +317,16 @@ def export(source: Path, destination: Path, precision: str, group_size: int) -> 
         for reader in readers.values():
             reader.close()
 
+    verification = verify_archive(destination)
     report = {
         "archive": str(destination),
+        "archive_sha256": sha256_file(destination),
         "precision": precision,
         "bytes": destination.stat().st_size,
+        "payload_bytes": verification["payload_bytes"],
         "tensor_count": len(records),
+        "dtype_counts": verification["dtype_counts"],
+        "verification": verification,
         "quantized_tensor_count": len(quantization),
         "max_groupwise_abs_error": max(
             (item["max_abs_error"] for item in quantization), default=0.0
@@ -228,6 +335,14 @@ def export(source: Path, destination: Path, precision: str, group_size: int) -> 
             np.mean([item["mean_abs_error"] for item in quantization])
         ) if quantization else 0.0,
         "quantized_tensors": quantization,
+        "bfloat16_tensor_count": len(bfloat16_conversion),
+        "max_bfloat16_abs_error": max(
+            (item["max_abs_error"] for item in bfloat16_conversion), default=0.0
+        ),
+        "mean_tensor_bfloat16_abs_error": float(
+            np.mean([item["mean_abs_error"] for item in bfloat16_conversion])
+        ) if bfloat16_conversion else 0.0,
+        "bfloat16_tensors": bfloat16_conversion,
     }
     return report
 
@@ -247,13 +362,38 @@ def copy_metadata(source: Path, output: Path) -> None:
             shutil.copy2(path, output / name)
 
 
+def self_test() -> None:
+    exact = np.array([0.0, -0.0, 1.0, -2.5, np.inf, -np.inf], dtype=np.float32)
+    exact_roundtrip = bfloat16_to_float32(float32_to_bfloat16(exact))
+    np.testing.assert_array_equal(exact_roundtrip, exact)
+
+    tie_to_even = np.array([1.0 + 1.0 / 256.0], dtype=np.float32)
+    assert int(float32_to_bfloat16(tie_to_even)[0]) == 0x3F80
+    above_tie = np.nextafter(tie_to_even, np.float32(np.inf))
+    assert int(float32_to_bfloat16(above_tie)[0]) == 0x3F81
+
+    nan_roundtrip = bfloat16_to_float32(
+        float32_to_bfloat16(np.array([np.nan], dtype=np.float32))
+    )
+    assert np.isnan(nan_roundtrip[0])
+    print("BF16 exporter self-test passed")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--precision", choices=("fp32", "int8", "all"), default="all")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--source", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--precision", choices=("fp32", "int8", "w16a16", "all"), default="all"
+    )
     parser.add_argument("--group-size", type=int, default=64)
     args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return
+    if args.source is None or args.output is None:
+        parser.error("--source and --output are required unless --self-test is used")
     if args.group_size <= 0:
         parser.error("group size must be positive")
 
@@ -263,6 +403,15 @@ def main() -> None:
         reports.append(export(args.source, args.output / "model.fp32.qbin", "fp32", args.group_size))
     if args.precision in ("int8", "all"):
         reports.append(export(args.source, args.output / "model.int8.qbin", "int8", args.group_size))
+    if args.precision in ("w16a16", "all"):
+        reports.append(
+            export(
+                args.source,
+                args.output / "model.w16a16.qbin",
+                "w16a16",
+                args.group_size,
+            )
+        )
     report_path = args.output / "export_report.json"
     report_path.write_text(json.dumps(reports, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(reports, indent=2, ensure_ascii=False))
