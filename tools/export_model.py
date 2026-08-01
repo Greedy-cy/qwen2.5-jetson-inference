@@ -14,6 +14,7 @@ import mmap
 import os
 import shutil
 import struct
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -246,7 +247,32 @@ def quantize_groupwise(weight: np.ndarray, group_size: int) -> tuple[np.ndarray,
     return quantized, scales, max_error, error_sum / max(error_count, 1)
 
 
+def groupwise_reconstruction_error(
+    weight: np.ndarray, quantized: np.ndarray, scales: np.ndarray, group_size: int
+) -> tuple[float, float]:
+    rows, columns = weight.shape
+    groups = (columns + group_size - 1) // group_size
+    if quantized.shape != weight.shape or scales.shape != (rows, groups):
+        raise ValueError("groupwise reconstruction shapes do not match")
+    max_error = 0.0
+    error_sum = 0.0
+    error_count = 0
+    for group in range(groups):
+        begin = group * group_size
+        end = min(columns, begin + group_size)
+        reconstructed = (
+            quantized[:, begin:end].astype(np.float32) * scales[:, group, None]
+        )
+        error = np.abs(weight[:, begin:end] - reconstructed)
+        max_error = max(max_error, float(error.max(initial=0.0)))
+        error_sum += float(error.sum(dtype=np.float64))
+        error_count += error.size
+    return max_error, error_sum / max(error_count, 1)
+
+
 def export(source: Path, destination: Path, precision: str, group_size: int) -> dict:
+    if precision == "w8a16" and group_size != 64:
+        raise ValueError("w8a16 currently requires group size 64")
     tensors, readers = discover_tensors(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     records: list[dict] = []
@@ -258,7 +284,54 @@ def export(source: Path, destination: Path, precision: str, group_size: int) -> 
             output.seek(DATA_OFFSET)
             for index, tensor in enumerate(tensors, 1):
                 array = readers[tensor.path].array(tensor)
-                if precision == "w16a16":
+                if precision == "w8a16" and should_quantize(tensor.name, array):
+                    q, scales, _, _ = quantize_groupwise(array, group_size)
+                    scale_storage = float32_to_bfloat16(scales)
+                    scale_max_error, scale_mean_error = bfloat16_error(
+                        scales, scale_storage
+                    )
+                    stored_scales = bfloat16_to_float32(scale_storage).reshape(
+                        scales.shape
+                    )
+                    max_error, mean_error = groupwise_reconstruction_error(
+                        array, q, stored_scales, group_size
+                    )
+                    scale_name = tensor.name + ".scale"
+                    write_tensor(
+                        output,
+                        records,
+                        tensor.name,
+                        q,
+                        "int8",
+                        {
+                            "scheme": "symmetric_group_w8a16",
+                            "group_size": group_size,
+                            "axis": 1,
+                            "scale_tensor": scale_name,
+                            "scale_dtype": "bfloat16",
+                        },
+                    )
+                    write_tensor(
+                        output, records, scale_name, scale_storage, "bfloat16"
+                    )
+                    quantization.append(
+                        {
+                            "name": tensor.name,
+                            "scale_tensor": scale_name,
+                            "scale_dtype": "bfloat16",
+                            "groups_per_row": scales.shape[1],
+                            "max_abs_error": max_error,
+                            "mean_abs_error": mean_error,
+                        }
+                    )
+                    bfloat16_conversion.append(
+                        {
+                            "name": scale_name,
+                            "max_abs_error": scale_max_error,
+                            "mean_abs_error": scale_mean_error,
+                        }
+                    )
+                elif precision in ("w16a16", "w8a16"):
                     storage = float32_to_bfloat16(array)
                     max_error, mean_error = bfloat16_error(array, storage)
                     write_tensor(
@@ -304,7 +377,7 @@ def export(source: Path, destination: Path, precision: str, group_size: int) -> 
                 "version": VERSION,
                 "source": str(source),
                 "precision": precision,
-                "group_size": group_size if precision == "int8" else None,
+                "group_size": group_size if precision in ("int8", "w8a16") else None,
                 "tensors": records,
             }
             encoded = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -379,23 +452,125 @@ def self_test() -> None:
     print("BF16 exporter self-test passed")
 
 
+def w8a16_self_test() -> None:
+    with tempfile.TemporaryDirectory(prefix="qwen-w8a16-export-") as temporary:
+        source = Path(temporary) / "source"
+        source.mkdir()
+        tensors = {
+            "model.embed_tokens.weight": np.linspace(
+                -0.25, 0.25, 20, dtype=np.float32
+            ).reshape(4, 5),
+            "model.layers.0.self_attn.q_proj.weight": np.linspace(
+                -0.75, 0.75, 210, dtype=np.float32
+            ).reshape(3, 70),
+            "model.layers.0.self_attn.q_proj.bias": np.array(
+                [0.125, -0.25, 0.5], dtype=np.float32
+            ),
+            "model.norm.weight": np.linspace(0.5, 1.5, 5, dtype=np.float32),
+            "lm_head.weight": np.linspace(
+                -0.125, 0.125, 20, dtype=np.float32
+            ).reshape(4, 5),
+        }
+        tensors["model.layers.0.self_attn.q_proj.weight"][2, :64] = 0.0
+        header = {}
+        payload = []
+        offset = 0
+        for name, array in tensors.items():
+            storage = np.ascontiguousarray(array, dtype="<f4")
+            header[name] = {
+                "dtype": "F32",
+                "shape": list(storage.shape),
+                "data_offsets": [offset, offset + storage.nbytes],
+            }
+            payload.append(storage)
+            offset += storage.nbytes
+        encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
+        with (source / "model.safetensors").open("wb") as output:
+            output.write(struct.pack("<Q", len(encoded)))
+            output.write(encoded)
+            for array in payload:
+                array.tofile(output)
+
+        destination = Path(temporary) / "model.w8a16.qbin"
+        report = export(source, destination, "w8a16", 64)
+        assert report["precision"] == "w8a16"
+        assert report["quantized_tensor_count"] == 1
+        assert report["tensor_count"] == 6
+        assert report["dtype_counts"]["int8"] == 1
+        assert report["dtype_counts"]["bfloat16"] == 5
+        assert report["max_groupwise_abs_error"] <= 0.007
+        assert report["verification"]["all_tensor_sha256_verified"]
+
+        with destination.open("rb") as archive:
+            mapping = mmap.mmap(archive.fileno(), 0, access=mmap.ACCESS_READ)
+            try:
+                _, _, json_size, data_offset, _ = FILE_HEADER.unpack_from(mapping, 0)
+                metadata = json.loads(
+                    mapping[FILE_HEADER.size : FILE_HEADER.size + json_size]
+                )
+                records = {item["name"]: item for item in metadata["tensors"]}
+                weight_name = "model.layers.0.self_attn.q_proj.weight"
+                scale_name = weight_name + ".scale"
+                weight_record = records[weight_name]
+                scale_record = records[scale_name]
+                assert metadata["precision"] == "w8a16"
+                assert metadata["group_size"] == 64
+                assert weight_record["dtype"] == "int8"
+                assert weight_record["quant"]["scheme"] == "symmetric_group_w8a16"
+                assert weight_record["quant"]["scale_dtype"] == "bfloat16"
+                assert weight_record["quant"]["scale_tensor"] == scale_name
+                assert scale_record["dtype"] == "bfloat16"
+                assert scale_record["shape"] == [3, 2]
+                assert records["model.embed_tokens.weight"]["dtype"] == "bfloat16"
+                assert records["model.norm.weight"]["dtype"] == "bfloat16"
+                assert records["lm_head.weight"]["dtype"] == "bfloat16"
+                q = np.frombuffer(
+                    mapping,
+                    dtype=np.int8,
+                    count=210,
+                    offset=data_offset + weight_record["offset"],
+                ).copy().reshape(3, 70)
+                scale_storage = np.frombuffer(
+                    mapping,
+                    dtype="<u2",
+                    count=6,
+                    offset=data_offset + scale_record["offset"],
+                ).copy().reshape(3, 2)
+            finally:
+                mapping.close()
+        scales = bfloat16_to_float32(scale_storage).reshape(3, 2)
+        max_error, _ = groupwise_reconstruction_error(
+            tensors[weight_name], q, scales, 64
+        )
+        assert abs(max_error - report["max_groupwise_abs_error"]) < 1e-12
+    print("W8A16 exporter self-test passed")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--self-test-w8a16", action="store_true")
     parser.add_argument("--source", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument(
-        "--precision", choices=("fp32", "int8", "w16a16", "all"), default="all"
+        "--precision",
+        choices=("fp32", "int8", "w16a16", "w8a16", "all"),
+        default="all",
     )
     parser.add_argument("--group-size", type=int, default=64)
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return
+    if args.self_test_w8a16:
+        w8a16_self_test()
+        return
     if args.source is None or args.output is None:
         parser.error("--source and --output are required unless --self-test is used")
     if args.group_size <= 0:
         parser.error("group size must be positive")
+    if args.precision in ("w8a16", "all") and args.group_size != 64:
+        parser.error("w8a16 currently requires --group-size 64")
 
     copy_metadata(args.source, args.output)
     reports = []
@@ -409,6 +584,15 @@ def main() -> None:
                 args.source,
                 args.output / "model.w16a16.qbin",
                 "w16a16",
+                args.group_size,
+            )
+        )
+    if args.precision in ("w8a16", "all"):
+        reports.append(
+            export(
+                args.source,
+                args.output / "model.w8a16.qbin",
+                "w8a16",
                 args.group_size,
             )
         )

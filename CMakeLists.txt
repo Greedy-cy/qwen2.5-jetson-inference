@@ -80,4 +80,6 @@ if(INFER_BUILD_TESTS)
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/run_benchmark.py --self-test)
   add_test(NAME ExportModel.BFloat16SelfTest
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/export_model.py --self-test)
+  add_test(NAME ExportModel.W8A16SelfTest
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/export_model.py --self-test-w8a16)
 endif()
