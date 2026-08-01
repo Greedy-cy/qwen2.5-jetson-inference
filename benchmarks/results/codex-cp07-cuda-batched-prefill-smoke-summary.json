@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "checkpoint": "CODEX-CP07",
+  "title": "CUDA FP32/W8A32 batched prefill implementation smoke",
+  "classification": "non_formal_smoke",
+  "base_commit": "7f6e34374acd6704ba7c6f9cfd378354c2783eed",
+  "device": {
+    "name": "Jetson Orin Nano Super 8GB",
+    "cuda": "12.6",
+    "build_type": "Release",
+    "compiler_flags": "-O3 -DNDEBUG"
+  },
+  "model": {
+    "name": "Qwen2.5-0.5B-Instruct",
+    "fp32_sha256": "a58918c8fcbe0332c3a09d233f14425d1ecf32facca658b92203ff89d81c0b63",
+    "w8a32_sha256": "6315f60dce24ee6f4e2b9609c69df222c2d02e78f37f1c1f21d13d8b20793d90"
+  },
+  "workload": {
+    "prompt_tokens": 32,
+    "max_new_tokens": 1,
+    "max_sequence_length": 64,
+    "warmup": 1,
+    "repeat": 3,
+    "clock_locked": false,
+    "power_sampled": false
+  },
+  "correctness": {
+    "tests_passed": 18,
+    "tests_total": 18,
+    "required_prompt_lengths": [1, 2, 31, 32, 127, 128, 512],
+    "tiny_fp32_min_cosine": 0.999999,
+    "tiny_fp32_decode_tokens_matched": 16,
+    "real_fp32_custom": {
+      "cosine": 1.0,
+      "top1_serial": 64,
+      "top1_batched": 64,
+      "max_abs": 0.0002789497375488281
+    },
+    "real_fp32_cublas": {
+      "cosine": 1.0,
+      "top1_serial": 64,
+      "top1_batched": 64,
+      "max_abs": 0.000032901763916015625
+    },
+    "real_w8a32": {
+      "cosine": 1.0,
+      "top1_serial": 64,
+      "top1_batched": 64,
+      "max_abs": 0.0
+    }
+  },
+  "results": [
+    {
+      "path": "cuda_fp32_serial",
+      "ttft_mean_ms": 1395.3680443333333,
+      "ttft_cv_percent": 0.13397059537653613,
+      "prefill_tokens_per_second": 22.933058783759638,
+      "workspace_mib": 0.65
+    },
+    {
+      "path": "cuda_fp32_batched_custom",
+      "ttft_mean_ms": 498.3765163333333,
+      "ttft_cv_percent": 0.004090981681534679,
+      "prefill_tokens_per_second": 64.20848295378522,
+      "workspace_mib": 5.37
+    },
+    {
+      "path": "cuda_fp32_batched_cublas",
+      "ttft_mean_ms": 48.86940366666666,
+      "ttft_cv_percent": 7.344130800717685,
+      "prefill_tokens_per_second": 658.181167234007,
+      "workspace_mib": 5.37
+    },
+    {
+      "path": "cuda_w8a32_serial",
+      "ttft_mean_ms": 960.3237273333334,
+      "ttft_cv_percent": 0.054425800594497406,
+      "prefill_tokens_per_second": 33.32210645691041,
+      "workspace_mib": 0.65
+    },
+    {
+      "path": "cuda_w8a32_batched",
+      "ttft_mean_ms": 723.2812456666667,
+      "ttft_cv_percent": 0.03390021093602845,
+      "prefill_tokens_per_second": 44.24282237234127,
+      "workspace_mib": 5.37
+    }
+  ],
+  "speedups": {
+    "fp32_custom_batched_vs_serial": 2.80,
+    "fp32_cublas_batched_vs_serial": 28.55,
+    "fp32_cublas_vs_custom_batched": 10.20,
+    "w8a32_batched_vs_serial": 1.33
+  },
+  "notes": [
+    "Smoke data is not clock-locked and is not the Checkpoint 8 formal benchmark.",
+    "The FP32 cuBLAS path has TTFT CV above 3 percent and must be rerun under the formal protocol.",
+    "A16 remains planned as BF16; this checkpoint does not introduce A16."
+  ]
+}

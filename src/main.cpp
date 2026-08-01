@@ -42,13 +42,13 @@ void usage() {
       "Qwen2.5 C++/CUDA inference\n\n"
       "Usage:\n"
       "  llm_infer generate --model DIR --prompt TEXT [--backend cpu|cuda]\n"
-      "                     [--precision fp32|int8] [--max-new-tokens 128]\n"
+      "                     [--precision fp32|w8a32] [--max-new-tokens 128]\n"
       "                     [--max-seq-len 2048] [--system TEXT] [--raw] [--cublas]\n"
       "                     [--prefill-mode auto|serial|batched]\n"
       "  llm_infer benchmark --model DIR (--prompt TEXT | --token-ids CSV)\n"
       "                      [--warmup 5] [--repeat 20] [--json FILE]\n"
       "                      [--telemetry-markers] [other generation options]\n"
-      "  llm_infer inspect --model DIR [--precision fp32|int8] [--max-seq-len 2048]\n"
+      "  llm_infer inspect --model DIR [--precision fp32|w8a32] [--max-seq-len 2048]\n"
       "  llm_infer tokenize --model DIR --text TEXT [--chat]\n"
       "  llm_infer logits --model DIR (--prompt TEXT | --token-ids CSV) --output FILE\n";
 }
@@ -61,8 +61,8 @@ Device parse_device(const std::string& text) {
 
 Precision parse_precision(const std::string& text) {
   if (text == "fp32") return Precision::kFloat32;
-  if (text == "int8") return Precision::kInt8;
-  throw infer::Error("precision must be fp32 or int8");
+  if (text == "w8a32" || text == "int8") return Precision::kInt8;
+  throw infer::Error("precision must be fp32 or w8a32 (int8 is an alias)");
 }
 
 infer::RuntimeOptions runtime_options(const Arguments& args) {

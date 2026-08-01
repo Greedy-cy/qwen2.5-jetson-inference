@@ -241,6 +241,136 @@ __global__ void attention_kernel(const float* q, const float* key_cache,
   }
 }
 
+__global__ void embedding_batch_kernel(const float* table, const int* tokens,
+                                       float* output, int token_count, int hidden) {
+  const int n = token_count * hidden;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+       i += blockDim.x * gridDim.x) {
+    const int token_index = i / hidden;
+    const int column = i % hidden;
+    output[i] = table[static_cast<size_t>(tokens[token_index]) * hidden + column];
+  }
+}
+
+__global__ void rms_norm_batch_kernel(const float* input, const float* weight,
+                                      float* output, int token_count, int hidden,
+                                      float epsilon) {
+  const int token = blockIdx.x;
+  if (token >= token_count) return;
+  __shared__ float reduction[256];
+  const float* input_row = input + static_cast<size_t>(token) * hidden;
+  float* output_row = output + static_cast<size_t>(token) * hidden;
+  float sum = 0.0f;
+  for (int i = threadIdx.x; i < hidden; i += blockDim.x) {
+    sum += input_row[i] * input_row[i];
+  }
+  reduction[threadIdx.x] = sum;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) reduction[threadIdx.x] += reduction[threadIdx.x + stride];
+    __syncthreads();
+  }
+  const float scale = rsqrtf(reduction[0] / hidden + epsilon);
+  for (int i = threadIdx.x; i < hidden; i += blockDim.x) {
+    output_row[i] = input_row[i] * scale * weight[i];
+  }
+}
+
+__global__ void add_bias_batch_kernel(float* output, const float* bias,
+                                      int tokens, int out_features) {
+  const int n = tokens * out_features;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+       i += blockDim.x * gridDim.x) {
+    output[i] += bias[i % out_features];
+  }
+}
+
+__global__ void rope_batch_kernel(float* data, int token_count, int heads,
+                                  int head_dim, int start_position, float theta) {
+  const int head = blockIdx.x;
+  const int token = blockIdx.y;
+  const int i = threadIdx.x;
+  const int half = head_dim / 2;
+  if (token >= token_count || head >= heads || i >= half) return;
+  float* values = data +
+      (static_cast<size_t>(token) * heads + head) * head_dim;
+  const float frequency = powf(theta, -2.0f * i / head_dim);
+  float sine;
+  float cosine;
+  sincosf((start_position + token) * frequency, &sine, &cosine);
+  const float first = values[i];
+  const float second = values[i + half];
+  values[i] = first * cosine - second * sine;
+  values[i + half] = second * cosine + first * sine;
+}
+
+__global__ void store_kv_batch_kernel(
+    const float* key, const float* value, float* key_cache, float* value_cache,
+    int token_count, int kv_heads, int head_dim, int max_sequence) {
+  const int n = token_count * kv_heads * head_dim;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+       i += blockDim.x * gridDim.x) {
+    const int dim = i % head_dim;
+    const int token_head = i / head_dim;
+    const int head = token_head % kv_heads;
+    const int token = token_head / kv_heads;
+    const size_t cache_offset =
+        (static_cast<size_t>(head) * max_sequence + token) * head_dim + dim;
+    key_cache[cache_offset] = key[i];
+    value_cache[cache_offset] = value[i];
+  }
+}
+
+__global__ void attention_prefill_kernel(
+    const float* q, const float* key_cache, const float* value_cache,
+    float* output, int token_count, int num_heads, int num_kv_heads,
+    int head_dim, int max_sequence) {
+  extern __shared__ float scores[];
+  __shared__ float maximum;
+  __shared__ float denominator;
+  const int head = blockIdx.x;
+  const int token = blockIdx.y;
+  if (token >= token_count || head >= num_heads) return;
+  const int sequence_length = token + 1;
+  const int kv_head = head / (num_heads / num_kv_heads);
+  const float* query =
+      q + (static_cast<size_t>(token) * num_heads + head) * head_dim;
+  const float scale = rsqrtf(static_cast<float>(head_dim));
+  for (int pos = threadIdx.x; pos < sequence_length; pos += blockDim.x) {
+    const float* key = key_cache +
+        (static_cast<size_t>(kv_head) * max_sequence + pos) * head_dim;
+    float dot = 0.0f;
+    for (int d = 0; d < head_dim; ++d) dot = fmaf(query[d], key[d], dot);
+    scores[pos] = dot * scale;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float m = -FLT_MAX;
+    for (int pos = 0; pos < sequence_length; ++pos) m = fmaxf(m, scores[pos]);
+    maximum = m;
+  }
+  __syncthreads();
+  for (int pos = threadIdx.x; pos < sequence_length; pos += blockDim.x) {
+    scores[pos] = expf(scores[pos] - maximum);
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float sum = 0.0f;
+    for (int pos = 0; pos < sequence_length; ++pos) sum += scores[pos];
+    denominator = sum;
+  }
+  __syncthreads();
+  for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+    float sum = 0.0f;
+    for (int pos = 0; pos < sequence_length; ++pos) {
+      const float* value = value_cache +
+          (static_cast<size_t>(kv_head) * max_sequence + pos) * head_dim;
+      sum = fmaf(scores[pos] / denominator, value[d], sum);
+    }
+    output[(static_cast<size_t>(token) * num_heads + head) * head_dim + d] = sum;
+  }
+}
+
 __global__ void add_kernel(float* x, const float* residual, int n) {
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
        i += blockDim.x * gridDim.x) x[i] += residual[i];
@@ -371,6 +501,78 @@ void attention_decode(const float* q, const float* key_cache, const float* value
   attention_kernel<<<num_heads, 128, sequence_length * sizeof(float), stream>>>(
       q, key_cache, value_cache, output, num_heads, num_kv_heads, head_dim,
       sequence_length, max_sequence_length);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void embedding_batch(const float* table, const int* tokens, float* output,
+                     int token_count, int hidden_size, cudaStream_t stream) {
+  const int n = token_count * hidden_size;
+  embedding_batch_kernel<<<blocks_for(n), 256, 0, stream>>>(
+      table, tokens, output, token_count, hidden_size);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void rms_norm_batch(const float* input, const float* weight, float* output,
+                    int token_count, int hidden_size, float epsilon,
+                    cudaStream_t stream) {
+  rms_norm_batch_kernel<<<token_count, 256, 0, stream>>>(
+      input, weight, output, token_count, hidden_size, epsilon);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void gemm_fp32_cublas(cublasHandle_t handle, const float* weight,
+                      const float* input, float* output, int tokens,
+                      int out_features, int in_features, cudaStream_t stream) {
+  (void)stream;
+  const float alpha = 1.0f;
+  const float beta = 0.0f;
+  cublas_check(
+      cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, out_features, tokens,
+                  in_features, &alpha, weight, in_features, input, in_features,
+                  &beta, output, out_features),
+      "cublasSgemm");
+}
+
+void add_bias_batch(float* output, const float* bias, int tokens,
+                    int out_features, cudaStream_t stream) {
+  const int n = tokens * out_features;
+  add_bias_batch_kernel<<<blocks_for(n), 256, 0, stream>>>(
+      output, bias, tokens, out_features);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void rope_batch(float* q, float* k, int token_count, int num_heads,
+                int num_kv_heads, int head_dim, int start_position,
+                float theta, cudaStream_t stream) {
+  const dim3 q_grid(num_heads, token_count);
+  const dim3 k_grid(num_kv_heads, token_count);
+  rope_batch_kernel<<<q_grid, head_dim / 2, 0, stream>>>(
+      q, token_count, num_heads, head_dim, start_position, theta);
+  rope_batch_kernel<<<k_grid, head_dim / 2, 0, stream>>>(
+      k, token_count, num_kv_heads, head_dim, start_position, theta);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void store_kv_batch(const float* key, const float* value, float* key_cache,
+                    float* value_cache, int token_count, int kv_heads,
+                    int head_dim, int max_sequence_length,
+                    cudaStream_t stream) {
+  const int n = token_count * kv_heads * head_dim;
+  store_kv_batch_kernel<<<blocks_for(n), 256, 0, stream>>>(
+      key, value, key_cache, value_cache, token_count, kv_heads, head_dim,
+      max_sequence_length);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void attention_prefill(const float* q, const float* key_cache,
+                       const float* value_cache, float* output,
+                       int token_count, int num_heads, int num_kv_heads,
+                       int head_dim, int max_sequence_length,
+                       cudaStream_t stream) {
+  const dim3 grid(num_heads, token_count);
+  attention_prefill_kernel<<<grid, 128, token_count * sizeof(float), stream>>>(
+      q, key_cache, value_cache, output, token_count, num_heads, num_kv_heads,
+      head_dim, max_sequence_length);
   INFER_CUDA_CHECK(cudaGetLastError());
 }
 

@@ -33,7 +33,7 @@ enum class Precision { kFloat32, kInt8 };
 enum class PrefillMode { kAuto, kSerial, kBatched };
 
 inline const char* to_string(Device v) { return v == Device::kCpu ? "cpu" : "cuda"; }
-inline const char* to_string(Precision v) { return v == Precision::kFloat32 ? "fp32" : "int8"; }
+inline const char* to_string(Precision v) { return v == Precision::kFloat32 ? "fp32" : "w8a32"; }
 inline const char* to_string(PrefillMode v) {
   if (v == PrefillMode::kAuto) return "auto";
   if (v == PrefillMode::kSerial) return "serial";

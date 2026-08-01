@@ -119,6 +119,12 @@ TEST(CudaOps, TiledFp32AndBatchedInt8Gemm) {
                           static_cast<float*>(d_output.data()), tokens, out_features,
                           in_features, context.stream());
   const auto fp32 = read_output();
+  infer::cuda::gemm_fp32_cublas(
+      context.cublas(), static_cast<const float*>(d_weight.data()),
+      static_cast<const float*>(d_input.data()),
+      static_cast<float*>(d_output.data()), tokens, out_features, in_features,
+      context.stream());
+  const auto cublas = read_output();
   infer::cuda::gemm_int8(static_cast<const int8_t*>(d_qweight.data()),
                           static_cast<const float*>(d_scales.data()), 4,
                           static_cast<const float*>(d_input.data()),
@@ -132,6 +138,7 @@ TEST(CudaOps, TiledFp32AndBatchedInt8Gemm) {
         expected += input[token * in_features + col] * weight[row * in_features + col];
       }
       EXPECT_NEAR(fp32[token * out_features + row], expected, 1e-5f);
+      EXPECT_NEAR(cublas[token * out_features + row], expected, 1e-5f);
       EXPECT_NEAR(int8[token * out_features + row], expected, 1e-5f);
     }
   }

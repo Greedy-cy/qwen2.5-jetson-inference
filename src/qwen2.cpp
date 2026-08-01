@@ -104,16 +104,17 @@ void Qwen2Model::initialize_workspace() {
   logits_ = take(vocab);
   attention_scores_ = take(options_.max_sequence_length);
 
-  if (options_.backend == Device::kCpu &&
-      options_.precision == Precision::kFloat32 &&
-      options_.prefill_mode != PrefillMode::kSerial) {
+  if (options_.prefill_mode != PrefillMode::kSerial &&
+      ((options_.backend == Device::kCpu &&
+        options_.precision == Precision::kFloat32) ||
+       options_.backend == Device::kCuda)) {
     const size_t row_width =
         static_cast<size_t>(hidden) * 5 + static_cast<size_t>(kv) * 2 +
         static_cast<size_t>(intermediate) * 3;
     const size_t prefill_float_count =
         static_cast<size_t>(options_.max_sequence_length) * row_width;
     prefill_workspace_.resize(
-        align_up(prefill_float_count * sizeof(float)), Device::kCpu);
+        align_up(prefill_float_count * sizeof(float)), options_.backend);
     auto* prefill_base = static_cast<float*>(prefill_workspace_.data());
     size_t prefill_cursor = 0;
     auto take_prefill = [&](int width) {
@@ -132,6 +133,10 @@ void Qwen2Model::initialize_workspace() {
     prefill_gate_ = take_prefill(intermediate);
     prefill_up_ = take_prefill(intermediate);
     prefill_mlp_ = take_prefill(intermediate);
+    if (options_.backend == Device::kCuda) {
+      prefill_tokens_.resize(
+          options_.max_sequence_length * sizeof(int), Device::kCuda);
+    }
   }
 
   const size_t per_layer = static_cast<size_t>(config_.num_kv_heads) *
@@ -205,6 +210,39 @@ void Qwen2Model::linear_cpu_fp32_batch(
   cpu::linear_fp32_batch(float_weight(weight_name),
                          optional_float_weight(bias_name), input, output,
                          token_count, out_features, in_features);
+}
+
+void Qwen2Model::linear_cuda_batch(
+    std::string_view weight_name, std::string_view bias_name,
+    const float* input, float* output, int token_count, int out_features,
+    int in_features) {
+  INFER_CHECK(options_.backend == Device::kCuda,
+              "batched CUDA linear requires CUDA backend");
+  const auto& rec = archive_.record(weight_name);
+  if (rec.dtype == DType::kFloat32) {
+    if (options_.use_cublas_gemv) {
+      cuda::gemm_fp32_cublas(
+          cuda_context_->cublas(),
+          static_cast<const float*>(weight(weight_name)), input, output,
+          token_count, out_features, in_features, cuda_context_->stream());
+    } else {
+      cuda::gemm_fp32(static_cast<const float*>(weight(weight_name)), input,
+                      output, token_count, out_features, in_features,
+                      cuda_context_->stream());
+    }
+  } else {
+    INFER_CHECK(rec.quant.has_value(), "int8 tensor lacks quantization metadata");
+    cuda::gemm_int8(
+        static_cast<const int8_t*>(weight(weight_name)),
+        float_weight(rec.quant->scale_tensor), rec.quant->group_size, input,
+        output, token_count, out_features, in_features,
+        cuda_context_->stream());
+  }
+  const float* bias = optional_float_weight(bias_name);
+  if (bias) {
+    cuda::add_bias_batch(output, bias, token_count, out_features,
+                         cuda_context_->stream());
+  }
 }
 
 float* Qwen2Model::layer_key_cache(int layer) {
@@ -340,6 +378,90 @@ int Qwen2Model::prefill_cpu_fp32(const std::vector<int>& prompt_tokens) {
   return cpu::argmax(logits_, config_.vocab_size);
 }
 
+int Qwen2Model::prefill_cuda(const std::vector<int>& prompt_tokens) {
+  INFER_CHECK(options_.backend == Device::kCuda,
+              "CUDA batched prefill requires CUDA backend");
+  INFER_CHECK(prefill_workspace_.data() != nullptr &&
+                  prefill_tokens_.data() != nullptr,
+              "CUDA batched prefill workspace was not allocated");
+  const int token_count = static_cast<int>(prompt_tokens.size());
+  const int hidden = config_.hidden_size;
+  const int kv_dim = config_.kv_dim();
+  const int head_dim = config_.head_dim();
+  const int intermediate = config_.intermediate_size;
+  auto stream = cuda_context_->stream();
+
+  INFER_CUDA_CHECK(cudaMemcpyAsync(
+      prefill_tokens_.data(), prompt_tokens.data(),
+      static_cast<size_t>(token_count) * sizeof(int), cudaMemcpyHostToDevice,
+      stream));
+  cuda::embedding_batch(
+      float_weight("model.embed_tokens.weight"),
+      static_cast<const int*>(prefill_tokens_.data()), prefill_x_, token_count,
+      hidden, stream);
+  for (int layer = 0; layer < config_.num_layers; ++layer) {
+    const auto prefix = layer_prefix(layer);
+    cuda::rms_norm_batch(
+        prefill_x_, float_weight(prefix + "input_layernorm.weight"),
+        prefill_norm_, token_count, hidden, config_.rms_norm_eps, stream);
+    linear_cuda_batch(
+        prefix + "self_attn.q_proj.weight", prefix + "self_attn.q_proj.bias",
+        prefill_norm_, prefill_q_, token_count, hidden, hidden);
+    linear_cuda_batch(
+        prefix + "self_attn.k_proj.weight", prefix + "self_attn.k_proj.bias",
+        prefill_norm_, prefill_k_, token_count, kv_dim, hidden);
+    linear_cuda_batch(
+        prefix + "self_attn.v_proj.weight", prefix + "self_attn.v_proj.bias",
+        prefill_norm_, prefill_v_, token_count, kv_dim, hidden);
+    cuda::rope_batch(
+        prefill_q_, prefill_k_, token_count, config_.num_heads,
+        config_.num_kv_heads, head_dim, 0, config_.rope_theta, stream);
+    float* key_cache = layer_key_cache(layer);
+    float* value_cache = layer_value_cache(layer);
+    cuda::store_kv_batch(
+        prefill_k_, prefill_v_, key_cache, value_cache, token_count,
+        config_.num_kv_heads, head_dim, options_.max_sequence_length, stream);
+    cuda::attention_prefill(
+        prefill_q_, key_cache, value_cache, prefill_attention_, token_count,
+        config_.num_heads, config_.num_kv_heads, head_dim,
+        options_.max_sequence_length, stream);
+    linear_cuda_batch(prefix + "self_attn.o_proj.weight", {},
+                      prefill_attention_, prefill_hidden_tmp_, token_count,
+                      hidden, hidden);
+    cuda::add_inplace(prefill_x_, prefill_hidden_tmp_, token_count * hidden,
+                      stream);
+    cuda::rms_norm_batch(
+        prefill_x_, float_weight(prefix + "post_attention_layernorm.weight"),
+        prefill_norm_, token_count, hidden, config_.rms_norm_eps, stream);
+    linear_cuda_batch(prefix + "mlp.gate_proj.weight", {}, prefill_norm_,
+                      prefill_gate_, token_count, intermediate, hidden);
+    linear_cuda_batch(prefix + "mlp.up_proj.weight", {}, prefill_norm_,
+                      prefill_up_, token_count, intermediate, hidden);
+    cuda::silu_mul(prefill_gate_, prefill_up_, prefill_mlp_,
+                   token_count * intermediate, stream);
+    linear_cuda_batch(prefix + "mlp.down_proj.weight", {}, prefill_mlp_,
+                      prefill_hidden_tmp_, token_count, hidden, intermediate);
+    cuda::add_inplace(prefill_x_, prefill_hidden_tmp_, token_count * hidden,
+                      stream);
+  }
+
+  const float* last_hidden =
+      prefill_x_ + static_cast<size_t>(token_count - 1) * hidden;
+  cuda::rms_norm(last_hidden, float_weight("model.norm.weight"), norm_, hidden,
+                 config_.rms_norm_eps, stream);
+  const std::string lm_head = archive_.contains("lm_head.weight")
+                                  ? "lm_head.weight"
+                                  : "model.embed_tokens.weight";
+  linear(lm_head, {}, norm_, logits_, config_.vocab_size, hidden, true);
+  cuda::argmax(logits_, config_.vocab_size,
+               static_cast<int*>(argmax_buffer_.data()), stream);
+  int result = 0;
+  INFER_CUDA_CHECK(cudaMemcpyAsync(&result, argmax_buffer_.data(), sizeof(int),
+                                   cudaMemcpyDeviceToHost, stream));
+  cuda_context_->synchronize();
+  return result;
+}
+
 int Qwen2Model::forward_cuda(int token, int position) {
   const int hidden = config_.hidden_size;
   const int kv_dim = config_.kv_dim();
@@ -424,8 +546,9 @@ void Qwen2Model::reset() {
 PrefillMode Qwen2Model::effective_prefill_mode(size_t prompt_tokens) const {
   INFER_CHECK(prompt_tokens > 0, "prompt must contain at least one token");
   const bool supports_batched =
-      options_.backend == Device::kCpu &&
-      options_.precision == Precision::kFloat32;
+      (options_.backend == Device::kCpu &&
+       options_.precision == Precision::kFloat32) ||
+      options_.backend == Device::kCuda;
   if (options_.prefill_mode == PrefillMode::kAuto) {
     return prompt_tokens >= 2 && supports_batched
                ? PrefillMode::kBatched
@@ -454,11 +577,14 @@ int Qwen2Model::prefill(const std::vector<int>& prompt_tokens) {
       ++position_;
     }
   } else {
-    INFER_CHECK(options_.backend == Device::kCpu &&
-                    options_.precision == Precision::kFloat32,
-                "batched prefill currently supports CPU FP32 only in checkpoint 6");
+    INFER_CHECK((options_.backend == Device::kCpu &&
+                 options_.precision == Precision::kFloat32) ||
+                    options_.backend == Device::kCuda,
+                "batched prefill supports CPU FP32 and CUDA FP32/W8A32");
     ProfileRange implementation("qwen2.prefill.batched");
-    next = prefill_cpu_fp32(prompt_tokens);
+    next = options_.backend == Device::kCpu
+               ? prefill_cpu_fp32(prompt_tokens)
+               : prefill_cuda(prompt_tokens);
     position_ = static_cast<int>(prompt_tokens.size());
   }
   has_prefilled_ = true;
