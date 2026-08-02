@@ -54,6 +54,12 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def evict_file_page_cache(path: Path) -> None:
+    """Release hash-read archive pages before CUDA uses Jetson unified memory."""
+    with path.open("rb") as source:
+        os.posix_fadvise(source.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+
+
 def percentile(values: list[float], fraction: float) -> float:
     ordered = sorted(values)
     index = max(0, math.ceil(fraction * len(ordered)) - 1)
@@ -313,6 +319,8 @@ def collect_provenance(root: Path, model: Path, precision: str) -> dict[str, Any
     if not tegra_release.is_file():
         raise RuntimeError("benchmark runner requires NVIDIA Jetson Linux")
     default_nvcc = Path("/usr/local/cuda/bin/nvcc")
+    archive_sha256 = sha256_file(archive)
+    evict_file_page_cache(archive)
     nvcc = str(default_nvcc) if default_nvcc.is_file() else "nvcc"
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -323,7 +331,7 @@ def collect_provenance(root: Path, model: Path, precision: str) -> dict[str, Any
         "python": sys.version.split()[0],
         "model_directory": str(model.resolve()),
         "model_archive": str(archive.resolve()),
-        "model_archive_sha256": sha256_file(archive),
+        "model_archive_sha256": archive_sha256,
         "canonical_token_ids_sha256": hashlib.sha256(
             json.dumps(CANONICAL_TOKEN_IDS, separators=(",", ":")).encode()
         ).hexdigest(),
