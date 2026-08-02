@@ -192,6 +192,123 @@ class TinyQwen2Model {
     if (!bf16_output.good()) {
       throw std::runtime_error("failed to write tiny BF16 model archive");
     }
+    bf16_output.close();
+
+    nlohmann::json w8_metadata{{"tensors", nlohmann::json::array()}};
+    uint64_t w8_offset = 0;
+    std::vector<std::vector<char>> w8_payloads;
+    auto append_payload = [&](const std::string& name,
+                              const std::vector<int64_t>& shape,
+                              const char* dtype, std::vector<char> payload,
+                              nlohmann::json quant = nullptr) {
+      nlohmann::json record{
+          {"name", name},
+          {"shape", shape},
+          {"dtype", dtype},
+          {"offset", w8_offset},
+          {"nbytes", payload.size()},
+      };
+      if (!quant.is_null()) record["quant"] = std::move(quant);
+      w8_offset += payload.size();
+      w8_metadata["tensors"].push_back(std::move(record));
+      w8_payloads.push_back(std::move(payload));
+    };
+    auto bytes_of = [](const auto& values) {
+      std::vector<char> bytes(values.size() * sizeof(values[0]));
+      std::memcpy(bytes.data(), values.data(), bytes.size());
+      return bytes;
+    };
+    auto float_to_bf16 = [](float value) {
+      uint32_t bits = 0;
+      std::memcpy(&bits, &value, sizeof(bits));
+      bits += 0x7fffu + ((bits >> 16u) & 1u);
+      return static_cast<uint16_t>(bits >> 16u);
+    };
+
+    for (size_t tensor_index = 0; tensor_index < tensors.size();
+         ++tensor_index) {
+      const auto& tensor = tensors[tensor_index];
+      const bool quantized =
+          tensor.name.find("_proj.weight") != std::string::npos;
+      if (!quantized) {
+        append_payload(tensor.name, tensor.shape, "bfloat16",
+                       bytes_of(bf16_values[tensor_index]));
+        continue;
+      }
+
+      const int rows = static_cast<int>(tensor.shape[0]);
+      const int columns = static_cast<int>(tensor.shape[1]);
+      constexpr int kGroupSize = 64;
+      const int groups = (columns + kGroupSize - 1) / kGroupSize;
+      std::vector<int8_t> quantized_values(tensor.values.size());
+      std::vector<uint16_t> scales(static_cast<size_t>(rows) * groups);
+      for (int row = 0; row < rows; ++row) {
+        for (int group = 0; group < groups; ++group) {
+          const int begin = group * kGroupSize;
+          const int end = std::min(columns, begin + kGroupSize);
+          float max_abs = 0.0f;
+          for (int column = begin; column < end; ++column) {
+            max_abs = std::max(
+                max_abs,
+                std::abs(tensor.values[static_cast<size_t>(row) * columns +
+                                       column]));
+          }
+          const float scale = max_abs / 127.0f;
+          scales[static_cast<size_t>(row) * groups + group] =
+              float_to_bf16(scale);
+          for (int column = begin; column < end; ++column) {
+            const size_t index =
+                static_cast<size_t>(row) * columns + column;
+            quantized_values[index] =
+                scale == 0.0f
+                    ? 0
+                    : static_cast<int8_t>(std::clamp(
+                          static_cast<int>(std::lround(
+                              tensor.values[index] / scale)),
+                          -127, 127));
+          }
+        }
+      }
+      const std::string scale_name = tensor.name + ".scale";
+      append_payload(
+          tensor.name, tensor.shape, "int8", bytes_of(quantized_values),
+          {{"scheme", "symmetric_group_w8a16"},
+           {"group_size", kGroupSize},
+           {"axis", 1},
+           {"scale_tensor", scale_name},
+           {"scale_dtype", "bfloat16"}});
+      append_payload(scale_name, {rows, groups}, "bfloat16",
+                     bytes_of(scales));
+    }
+
+    const std::string w8_metadata_text = w8_metadata.dump();
+    TestArchiveHeader w8_header{};
+    std::memcpy(w8_header.magic, "QWENBIN1", sizeof(w8_header.magic));
+    w8_header.version = 1;
+    w8_header.json_size =
+        static_cast<uint32_t>(w8_metadata_text.size());
+    w8_header.data_offset =
+        align_up(sizeof(w8_header) + w8_metadata_text.size(), 256);
+    std::ofstream w8_output(
+        path_ / "model.w8a16.qbin", std::ios::binary);
+    w8_output.write(
+        reinterpret_cast<const char*>(&w8_header), sizeof(w8_header));
+    w8_output.write(
+        w8_metadata_text.data(),
+        static_cast<std::streamsize>(w8_metadata_text.size()));
+    const std::vector<char> w8_padding(
+        w8_header.data_offset - sizeof(w8_header) -
+            w8_metadata_text.size(),
+        0);
+    w8_output.write(
+        w8_padding.data(), static_cast<std::streamsize>(w8_padding.size()));
+    for (const auto& payload : w8_payloads) {
+      w8_output.write(
+          payload.data(), static_cast<std::streamsize>(payload.size()));
+    }
+    if (!w8_output.good()) {
+      throw std::runtime_error("failed to write tiny W8A16 model archive");
+    }
   }
 
   std::filesystem::path path_;
@@ -216,6 +333,14 @@ infer::RuntimeOptions cuda_bf16_options(
   options.linear_kernel = kernel;
   return options;
 }
+infer::RuntimeOptions cuda_w8a16_options(
+    int max_sequence_length = 32,
+    infer::LinearKernel kernel = infer::LinearKernel::kCublas) {
+  auto options = cuda_bf16_options(max_sequence_length, kernel);
+  options.precision = infer::Precision::kW8A16;
+  return options;
+}
+
 
 uint64_t archive_payload_bytes(const infer::ModelArchive& archive) {
   uint64_t bytes = 0;
@@ -487,4 +612,44 @@ TEST(Qwen2BFloat16, CustomMatchesCublasAndUsesBf16Storage) {
             static_cast<size_t>(fp32.workspace_bytes() * 0.55));
   EXPECT_EQ(archive_payload_bytes(cublas.archive()) * 2,
             archive_payload_bytes(fp32.archive()));
+}
+
+TEST(Qwen2W8A16, PrefillAndDecodeReuseBf16Runtime) {
+  int devices = 0;
+  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    GTEST_SKIP();
+  }
+  TinyQwen2Model tiny;
+  infer::Qwen2Model w16(tiny.path(), cuda_bf16_options(64));
+  infer::Qwen2Model w8(tiny.path(), cuda_w8a16_options(64));
+  const auto prompt = prompt_tokens(32);
+
+  int token = w16.prefill(prompt);
+  ASSERT_EQ(w8.prefill(prompt), token);
+  EXPECT_GE(logits_cosine(w16, w8), 0.999);
+  for (int step = 0; step < 16; ++step) {
+    SCOPED_TRACE("decode_step=" + std::to_string(step));
+    const int w16_next = w16.decode_next(token);
+    const int w8_next = w8.decode_next(token);
+    ASSERT_EQ(w8_next, w16_next);
+    EXPECT_GE(logits_cosine(w16, w8), 0.999);
+    token = w16_next;
+  }
+
+  EXPECT_EQ(w8.position(), 48);
+  EXPECT_EQ(w8.kv_cache_bytes(), w16.kv_cache_bytes());
+  EXPECT_EQ(w8.workspace_bytes(), w16.workspace_bytes());
+  const auto& w8_q = w8.archive().record(
+      "model.layers.0.self_attn.q_proj.weight");
+  const auto& w16_q = w16.archive().record(
+      "model.layers.0.self_attn.q_proj.weight");
+  EXPECT_EQ(w8_q.nbytes * 2, w16_q.nbytes);
+  EXPECT_EQ(
+      w8.archive().record(
+          "model.layers.0.self_attn.q_proj.weight").dtype,
+      infer::DType::kInt8);
+  EXPECT_EQ(
+      w8.archive().record(
+          "model.layers.0.self_attn.q_proj.weight.scale").dtype,
+      infer::DType::kBFloat16);
 }

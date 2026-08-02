@@ -96,6 +96,9 @@ TEST(DType, BFloat16SizeAndNames) {
   EXPECT_STREQ(infer::to_string(infer::Precision::kW16A16), "w16a16");
   EXPECT_STREQ(infer::archive_filename(infer::Precision::kW16A16),
                "model.w16a16.qbin");
+  EXPECT_STREQ(infer::to_string(infer::Precision::kW8A16), "w8a16");
+  EXPECT_STREQ(infer::archive_filename(infer::Precision::kW8A16),
+               "model.w8a16.qbin");
 }
 
 TEST(ModelArchive, LoadsBFloat16Tensor) {

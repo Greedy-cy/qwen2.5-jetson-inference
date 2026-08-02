@@ -43,13 +43,13 @@ void usage() {
       "Qwen2.5 C++/CUDA inference\n\n"
       "Usage:\n"
       "  llm_infer generate --model DIR (--prompt TEXT | --token-ids CSV) [--backend cpu|cuda]\n"
-      "                     [--precision fp32|w8a32|w16a16] [--max-new-tokens 128]\n"
+      "                     [--precision fp32|w8a32|w16a16|w8a16] [--max-new-tokens 128]\n"
       "                     [--max-seq-len 2048] [--system TEXT] [--raw]\n"
       "                     [--linear-kernel custom|cublas] [--cublas]\n"
       "  llm_infer benchmark --model DIR (--prompt TEXT | --token-ids CSV)\n"
       "                      [--warmup 5] [--repeat 20] [--json FILE]\n"
       "                      [--telemetry-markers] [other generation options]\n"
-      "  llm_infer inspect --model DIR [--precision fp32|w8a32|w16a16] [--max-seq-len 2048]\n"
+      "  llm_infer inspect --model DIR [--precision fp32|w8a32|w16a16|w8a16] [--max-seq-len 2048]\n"
       "  llm_infer tokenize --model DIR --text TEXT [--chat]\n"
       "  llm_infer logits --model DIR (--prompt TEXT | --token-ids CSV) --output FILE\n";
 }
@@ -70,8 +70,9 @@ Precision parse_precision(const std::string& text) {
   if (text == "fp32") return Precision::kFloat32;
   if (text == "w8a32" || text == "int8") return Precision::kW8A32;
   if (text == "w16a16") return Precision::kW16A16;
+  if (text == "w8a16") return Precision::kW8A16;
   throw infer::Error(
-      "precision must be fp32, w8a32, or w16a16 (int8 is a w8a32 alias)");
+      "precision must be fp32, w8a32, w16a16, or w8a16 (int8 is a w8a32 alias)");
 }
 
 infer::RuntimeOptions runtime_options(const Arguments& args) {
@@ -85,7 +86,8 @@ infer::RuntimeOptions runtime_options(const Arguments& args) {
   if (!linear_kernel.empty()) {
     options.linear_kernel = parse_linear_kernel(linear_kernel);
   } else if (args.has("--cublas") ||
-             options.precision == Precision::kW16A16) {
+             options.precision == Precision::kW16A16 ||
+             options.precision == Precision::kW8A16) {
     options.linear_kernel = LinearKernel::kCublas;
   }
   return options;
@@ -177,7 +179,8 @@ void inspect(const Arguments& args) {
     if (rec.dtype == infer::DType::kBFloat16) ++bfloat16;
   }
   const int max_seq = args.get_int("--max-seq-len", 2048);
-  const auto kv_dtype = precision == Precision::kW16A16
+  const auto kv_dtype = (precision == Precision::kW16A16 ||
+                         precision == Precision::kW8A16)
                             ? infer::DType::kBFloat16
                             : infer::DType::kFloat32;
   const size_t kv_bytes = 2ULL * config.num_layers * config.num_kv_heads * max_seq *

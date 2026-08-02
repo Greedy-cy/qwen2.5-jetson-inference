@@ -81,7 +81,8 @@ void Qwen2Model::initialize_workspace() {
   const int kv = config_.kv_dim();
   const int intermediate = config_.intermediate_size;
   const int vocab = config_.vocab_size;
-  const bool use_bf16 = options_.precision == Precision::kW16A16;
+  const bool use_bf16 = options_.precision == Precision::kW16A16 ||
+                        options_.precision == Precision::kW8A16;
   const size_t element_size =
       use_bf16 ? sizeof(__nv_bfloat16) : sizeof(float);
   const size_t element_count =
@@ -223,17 +224,29 @@ void Qwen2Model::linear_cuda_bf16(
     const __nv_bfloat16* input, __nv_bfloat16* output, int out_features,
     int in_features) {
   INFER_CHECK(options_.backend == Device::kCuda &&
-                  options_.precision == Precision::kW16A16,
-              "BF16 linear requires CUDA W16A16");
-  const auto* weight_pointer = bf16_weight(weight_name);
+                  (options_.precision == Precision::kW16A16 ||
+                   options_.precision == Precision::kW8A16),
+              "BF16 linear requires CUDA W16A16 or W8A16");
+  const auto& rec = archive_.record(weight_name);
   const auto* bias = optional_bf16_weight(bias_name);
-  if (options_.linear_kernel == LinearKernel::kCublas) {
+  if (rec.dtype == DType::kInt8) {
+    INFER_CHECK(options_.precision == Precision::kW8A16,
+                "INT8/BF16 linear requires W8A16 precision");
+    INFER_CHECK(rec.quant.has_value(),
+                "W8A16 tensor lacks quantization metadata: " +
+                    std::string(weight_name));
+    cuda::gemv_w8a16(
+        static_cast<const int8_t*>(weight(weight_name)),
+        bf16_weight(rec.quant->scale_tensor), rec.quant->group_size, bias,
+        input, output, out_features, in_features, cuda_context_->stream());
+  } else if (options_.linear_kernel == LinearKernel::kCublas) {
     cuda::gemv_bf16_cublas(
-        cuda_context_->cublas(), weight_pointer, bias, input, output,
+        cuda_context_->cublas(), bf16_weight(weight_name), bias, input, output,
         out_features, in_features, cuda_context_->stream());
   } else {
-    cuda::gemv_bf16(weight_pointer, bias, input, output, out_features,
-                    in_features, cuda_context_->stream());
+    cuda::gemv_bf16(
+        bf16_weight(weight_name), bias, input, output, out_features,
+        in_features, cuda_context_->stream());
   }
 }
 
@@ -279,17 +292,30 @@ void Qwen2Model::linear_cuda_bf16_batch(
     const __nv_bfloat16* input, __nv_bfloat16* output, int token_count,
     int out_features, int in_features) {
   INFER_CHECK(options_.backend == Device::kCuda &&
-                  options_.precision == Precision::kW16A16,
-              "batched BF16 linear requires CUDA W16A16");
-  const auto* weight_pointer = bf16_weight(weight_name);
+                  (options_.precision == Precision::kW16A16 ||
+                   options_.precision == Precision::kW8A16),
+              "batched BF16 linear requires CUDA W16A16 or W8A16");
+  const auto& rec = archive_.record(weight_name);
   const auto* bias = optional_bf16_weight(bias_name);
-  if (options_.linear_kernel == LinearKernel::kCublas) {
+  if (rec.dtype == DType::kInt8) {
+    INFER_CHECK(options_.precision == Precision::kW8A16,
+                "INT8/BF16 batched linear requires W8A16 precision");
+    INFER_CHECK(rec.quant.has_value(),
+                "W8A16 tensor lacks quantization metadata: " +
+                    std::string(weight_name));
+    cuda::gemm_w8a16(
+        static_cast<const int8_t*>(weight(weight_name)),
+        bf16_weight(rec.quant->scale_tensor), rec.quant->group_size, bias,
+        input, output, token_count, out_features, in_features,
+        cuda_context_->stream());
+  } else if (options_.linear_kernel == LinearKernel::kCublas) {
     cuda::gemm_bf16_cublas(
-        cuda_context_->cublas(), weight_pointer, bias, input, output,
+        cuda_context_->cublas(), bf16_weight(weight_name), bias, input, output,
         token_count, out_features, in_features, cuda_context_->stream());
   } else {
-    cuda::gemm_bf16(weight_pointer, bias, input, output, token_count,
-                    out_features, in_features, cuda_context_->stream());
+    cuda::gemm_bf16(
+        bf16_weight(weight_name), bias, input, output, token_count,
+        out_features, in_features, cuda_context_->stream());
   }
 }
 
@@ -491,8 +517,9 @@ int Qwen2Model::prefill_cpu_fp32(const std::vector<int>& prompt_tokens) {
 int Qwen2Model::prefill_cuda_bf16(
     const std::vector<int>& prompt_tokens) {
   INFER_CHECK(options_.backend == Device::kCuda &&
-                  options_.precision == Precision::kW16A16,
-              "BF16 prefill requires CUDA W16A16");
+                  (options_.precision == Precision::kW16A16 ||
+                   options_.precision == Precision::kW8A16),
+              "BF16 prefill requires CUDA W16A16 or W8A16");
   INFER_CHECK(prefill_workspace_.data() != nullptr &&
                   prefill_tokens_.data() != nullptr,
               "BF16 prefill workspace was not allocated");
@@ -590,7 +617,8 @@ int Qwen2Model::prefill_cuda_bf16(
 }
 
 int Qwen2Model::prefill_cuda(const std::vector<int>& prompt_tokens) {
-  if (options_.precision == Precision::kW16A16) {
+  if (options_.precision == Precision::kW16A16 ||
+      options_.precision == Precision::kW8A16) {
     return prefill_cuda_bf16(prompt_tokens);
   }
   INFER_CHECK(options_.backend == Device::kCuda,
@@ -678,8 +706,9 @@ int Qwen2Model::prefill_cuda(const std::vector<int>& prompt_tokens) {
 
 int Qwen2Model::decode_token_cuda_bf16(int token, int position) {
   INFER_CHECK(options_.backend == Device::kCuda &&
-                  options_.precision == Precision::kW16A16,
-              "BF16 decode requires CUDA W16A16");
+                  (options_.precision == Precision::kW16A16 ||
+                   options_.precision == Precision::kW8A16),
+              "BF16 decode requires CUDA W16A16 or W8A16");
   const int hidden = config_.hidden_size;
   const int kv_dim = config_.kv_dim();
   const int head_dim = config_.head_dim();
@@ -758,7 +787,8 @@ int Qwen2Model::decode_token_cuda_bf16(int token, int position) {
 }
 
 int Qwen2Model::decode_token_cuda(int token, int position) {
-  if (options_.precision == Precision::kW16A16) {
+  if (options_.precision == Precision::kW16A16 ||
+      options_.precision == Precision::kW8A16) {
     return decode_token_cuda_bf16(token, position);
   }
   const int hidden = config_.hidden_size;
@@ -824,7 +854,8 @@ std::vector<float> Qwen2Model::last_logits_host() const {
   std::vector<float> result(static_cast<size_t>(config_.vocab_size));
   if (options_.backend == Device::kCpu) {
     std::copy(logits_, logits_ + config_.vocab_size, result.begin());
-  } else if (options_.precision == Precision::kW16A16) {
+  } else if (options_.precision == Precision::kW16A16 ||
+             options_.precision == Precision::kW8A16) {
     std::vector<uint16_t> bits(result.size());
     INFER_CUDA_CHECK(cudaMemcpyAsync(
         bits.data(), bf16_logits_, bits.size() * sizeof(uint16_t),
