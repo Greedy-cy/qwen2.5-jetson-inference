@@ -1,0 +1,157 @@
+{
+  "schema": "codex.checkpoint-report.v1",
+  "checkpoint": "CP18A",
+  "title": "W16A16 custom baseline and cuBLAS gap quantification",
+  "data_commit": "65d75edd16e436e327d57d17c8f0ac4cab087d23",
+  "target": {
+    "device": "Jetson Orin Nano Super 8GB",
+    "jetson_linux": "R36.4.7",
+    "architecture": "aarch64",
+    "cuda": "12.6",
+    "cuda_architecture": 87,
+    "power_mode": "MAXN_SUPER"
+  },
+  "model_archive": {
+    "precision": "w16a16_bfloat16",
+    "sha256": "f8b6b16a3a85d70083bfd7f822a7d587332982b0f0e27691512efa844855b2a6",
+    "bytes": 989114112,
+    "mib": 943.29,
+    "device_weights_mib": 942.29
+  },
+  "protocol": {
+    "batch_size": 1,
+    "prefill_implementation": "matrixized",
+    "decoding": "greedy_argmax",
+    "canonical": {
+      "prompt_tokens": 32,
+      "generated_tokens": 128,
+      "max_sequence_length": 256,
+      "warmup": 5,
+      "repeat": 20
+    },
+    "prompt_sweep": {
+      "prompt_tokens": [1, 32, 128, 512],
+      "generated_tokens": 1,
+      "max_sequence_length": 512,
+      "warmup": 5,
+      "repeat": 20
+    },
+    "linear_microbenchmark": {
+      "tokens": [32, 128, 512],
+      "warmup": 20,
+      "repeat": 100,
+      "timing": "CUDA Event",
+      "real_qwen_shapes": true
+    },
+    "telemetry_interval_ms": 100,
+    "clocks_locked_and_restored": true
+  },
+  "canonical": {
+    "custom": {
+      "ttft_ms": {"mean": 497.151721, "p50": 497.165091, "p95": 497.283756, "cv_percent": 0.018501},
+      "prefill_tokens_per_second": {"mean": 64.366671},
+      "decode_tokens_per_second": {"mean": 27.759858, "p50": 27.758820, "p95": 27.766503, "cv_percent": 0.017643},
+      "total_ms_mean": 5072.104005,
+      "power_w_mean": 13.309858,
+      "energy_per_generated_token_joules": 0.526958,
+      "peak_rss_mib": 2154.92
+    },
+    "cublas": {
+      "ttft_ms": {"mean": 16.752589, "p50": 16.751165, "p95": 16.766202, "cv_percent": 0.063233},
+      "prefill_tokens_per_second": {"mean": 1910.153255},
+      "decode_tokens_per_second": {"mean": 67.753738, "p50": 67.755196, "p95": 67.762623, "cv_percent": 0.015260},
+      "total_ms_mean": 1891.188486,
+      "power_w_mean": 18.163113,
+      "energy_per_generated_token_joules": 0.267707,
+      "peak_rss_mib": 2346.25
+    },
+    "custom_relative_to_cublas": {
+      "prefill_throughput_attainment": 0.033697,
+      "decode_throughput_attainment": 0.409717,
+      "ttft_ratio": 29.676112,
+      "total_latency_ratio": 2.681966,
+      "energy_per_token_ratio": 1.968412
+    }
+  },
+  "prompt_sweep": {
+    "custom": [
+      {"prompt_tokens": 1, "ttft_ms_mean": 258.190707, "ttft_cv_percent": 0.009821, "prefill_tokens_per_second_mean": 3.873106},
+      {"prompt_tokens": 32, "ttft_ms_mean": 497.201863, "ttft_cv_percent": 0.008128, "prefill_tokens_per_second_mean": 64.360178},
+      {"prompt_tokens": 128, "ttft_ms_mean": 1952.263582, "ttft_cv_percent": 0.006988, "prefill_tokens_per_second_mean": 65.564917},
+      {"prompt_tokens": 512, "ttft_ms_mean": 8045.669998, "ttft_cv_percent": 0.007646, "prefill_tokens_per_second_mean": 63.636714}
+    ],
+    "cublas": [
+      {"prompt_tokens": 1, "ttft_ms_mean": 14.325147, "ttft_cv_percent": 0.091620, "prefill_tokens_per_second_mean": 69.807371},
+      {"prompt_tokens": 32, "ttft_ms_mean": 16.785153, "ttft_cv_percent": 0.043374, "prefill_tokens_per_second_mean": 1906.447063},
+      {"prompt_tokens": 128, "ttft_ms_mean": 46.062098, "ttft_cv_percent": 0.030161, "prefill_tokens_per_second_mean": 2778.857615},
+      {"prompt_tokens": 512, "ttft_ms_mean": 455.481756, "ttft_cv_percent": 0.017308, "prefill_tokens_per_second_mean": 1124.084573}
+    ],
+    "custom_throughput_attainment": [
+      {"prompt_tokens": 1, "ratio": 0.055482},
+      {"prompt_tokens": 32, "ratio": 0.033760},
+      {"prompt_tokens": 128, "ratio": 0.023594},
+      {"prompt_tokens": 512, "ratio": 0.056613}
+    ]
+  },
+  "linear_microbenchmark": {
+    "decode_gemv_p50_ms": {
+      "q_proj": {"custom": 0.052096, "cublas": 0.036672},
+      "k_proj": {"custom": 0.014688, "cublas": 0.018016},
+      "v_proj": {"custom": 0.014048, "cublas": 0.018112},
+      "o_proj": {"custom": 0.049824, "cublas": 0.030048},
+      "gate_proj": {"custom": 0.312448, "cublas": 0.111936},
+      "up_proj": {"custom": 0.312768, "cublas": 0.111200},
+      "down_proj": {"custom": 0.177856, "cublas": 0.116864},
+      "tied_lm_head": {"custom": 9.526816, "cublas": 2.738656}
+    },
+    "decode_weighted_linear_p50_ms": {
+      "formula": "24 * sum(layer q/k/v/o/gate/up/down) + tied_lm_head",
+      "custom": 31.936289,
+      "cublas": 13.367008,
+      "custom_throughput_attainment": 0.418550
+    },
+    "prefill_one_layer_seven_gemm_p50_ms": [
+      {"prompt_tokens": 32, "custom": 20.151584, "cublas": 0.439296, "custom_throughput_attainment": 0.021800},
+      {"prompt_tokens": 128, "custom": 79.688320, "cublas": 0.593216, "custom_throughput_attainment": 0.007444},
+      {"prompt_tokens": 512, "custom": 317.866875, "cublas": 1.899872, "custom_throughput_attainment": 0.005977}
+    ],
+    "max_custom_vs_cublas_relative_to_output_peak": 0.006579
+  },
+  "nsight_systems": {
+    "version": "2024.5.4.34-245434855735v0",
+    "workload": {"prompt_tokens": 32, "generated_tokens": 16, "warmup": 1, "repeat": 3},
+    "custom": {
+      "top_kernels": [
+        {"name": "gemv_bf16_kernel", "gpu_kernel_time_percent": 51.4},
+        {"name": "gemm_bf16_tiled_kernel", "gpu_kernel_time_percent": 45.9}
+      ],
+      "nvtx_prefill_median_ms": 497.976288,
+      "nvtx_decode_token_median_ms": 37.624128
+    },
+    "cublas": {
+      "top_kernel_group": "Ampere BF16 Tensor Core GEMM",
+      "gpu_kernel_time_percent": 82.9,
+      "nvtx_prefill_median_ms": 17.104240,
+      "nvtx_decode_token_median_ms": 15.033120
+    },
+    "cuda_malloc_calls_per_trace": 9,
+    "per_token_cuda_malloc_observed": false
+  },
+  "acceptance": {
+    "same_precision_and_workload": true,
+    "all_canonical_decode_cv_le_3_percent": true,
+    "all_sweep_ttft_cv_le_3_percent": true,
+    "microbenchmark_correctness_passed": true,
+    "cp18a_measurement_complete": true,
+    "optimization_implemented_in_cp18a": false,
+    "next_bottleneck": "custom BF16 prefill GEMM without Tensor Core",
+    "next_checkpoint": "CP18B"
+  },
+  "raw_results": {
+    "canonical": "results/codex-cp18a-canonical-w16a16-{custom,cublas}.json",
+    "prompt_sweep": "results/codex-cp18a-sweep-w16a16-{custom,cublas}-p{1,32,128,512}.json",
+    "linear_microbenchmark": "results/codex-cp18a-bf16-linear-p{32,128,512}.json",
+    "nsight_reports": "results/codex-cp18a-nsys-w16a16-{custom,cublas}.*",
+    "version_controlled": false
+  }
+}
