@@ -32,24 +32,16 @@ __global__ void rms_norm_kernel(const float* input, const float* weight, float* 
   for (int i = threadIdx.x; i < n; i += blockDim.x) output[i] = input[i] * scale * weight[i];
 }
 
-template <class Weight, bool Quantized>
-__global__ void gemv_kernel(const Weight* weight, const float* scales, int group_size,
-                            const float* bias, const float* input, float* output,
-                            int out_features, int in_features) {
+__global__ void gemv_fp32_kernel(
+    const float* weight, const float* bias, const float* input, float* output,
+    int out_features, int in_features) {
   const int row = blockIdx.x;
   if (row >= out_features) return;
   __shared__ float reduction[256];
   float sum = 0.0f;
   for (int col = threadIdx.x; col < in_features; col += blockDim.x) {
-    float w;
-    if constexpr (Quantized) {
-      const int groups = (in_features + group_size - 1) / group_size;
-      w = static_cast<float>(weight[static_cast<size_t>(row) * in_features + col]) *
-          scales[static_cast<size_t>(row) * groups + col / group_size];
-    } else {
-      w = weight[static_cast<size_t>(row) * in_features + col];
-    }
-    sum = fmaf(w, input[col], sum);
+    sum = fmaf(weight[static_cast<size_t>(row) * in_features + col],
+               input[col], sum);
   }
   reduction[threadIdx.x] = sum;
   __syncthreads();
@@ -57,42 +49,11 @@ __global__ void gemv_kernel(const Weight* weight, const float* scales, int group
     if (threadIdx.x < stride) reduction[threadIdx.x] += reduction[threadIdx.x + stride];
     __syncthreads();
   }
-  if (threadIdx.x == 0) output[row] = reduction[0] + (bias ? bias[row] : 0.0f);
+  if (threadIdx.x == 0) {
+    output[row] = reduction[0] + (bias ? bias[row] : 0.0f);
+  }
 }
 
-__global__ void gemv_int8x4_kernel(const int8_t* weight, const float* scales,
-                                   int group_size, const float* bias,
-                                   const float* input, float* output,
-                                   int out_features, int in_features) {
-  const int row = blockIdx.x;
-  if (row >= out_features) return;
-  __shared__ float reduction[256];
-  const int groups = (in_features + group_size - 1) / group_size;
-  const int8_t* row_weight = weight + static_cast<size_t>(row) * in_features;
-  float sum = 0.0f;
-  for (int col = threadIdx.x * 4; col < in_features; col += blockDim.x * 4) {
-    if (col + 3 < in_features) {
-      const char4 packed = *reinterpret_cast<const char4*>(row_weight + col);
-      const float scale = scales[static_cast<size_t>(row) * groups + col / group_size];
-      sum = fmaf(static_cast<float>(packed.x) * scale, input[col], sum);
-      sum = fmaf(static_cast<float>(packed.y) * scale, input[col + 1], sum);
-      sum = fmaf(static_cast<float>(packed.z) * scale, input[col + 2], sum);
-      sum = fmaf(static_cast<float>(packed.w) * scale, input[col + 3], sum);
-    } else {
-      for (int i = col; i < in_features; ++i) {
-        const float scale = scales[static_cast<size_t>(row) * groups + i / group_size];
-        sum = fmaf(static_cast<float>(row_weight[i]) * scale, input[i], sum);
-      }
-    }
-  }
-  reduction[threadIdx.x] = sum;
-  __syncthreads();
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride) reduction[threadIdx.x] += reduction[threadIdx.x + stride];
-    __syncthreads();
-  }
-  if (threadIdx.x == 0) output[row] = reduction[0] + (bias ? bias[row] : 0.0f);
-}
 
 __global__ void gemm_tiled_kernel(const float* weight, const float* input,
                                   float* output, int tokens,
@@ -124,40 +85,6 @@ __global__ void gemm_tiled_kernel(const float* weight, const float* input,
   }
 }
 
-__global__ void gemm_int8x4_kernel(const int8_t* weight, const float* scales,
-                                   int group_size, const float* input, float* output,
-                                   int tokens, int out_features, int in_features) {
-  const int row = blockIdx.x;
-  const int token = blockIdx.y;
-  if (row >= out_features || token >= tokens) return;
-  __shared__ float reduction[256];
-  const int groups = (in_features + group_size - 1) / group_size;
-  const int8_t* row_weight = weight + static_cast<size_t>(row) * in_features;
-  const float* token_input = input + static_cast<size_t>(token) * in_features;
-  float sum = 0.0f;
-  for (int col = threadIdx.x * 4; col < in_features; col += blockDim.x * 4) {
-    if (col + 3 < in_features) {
-      const char4 packed = *reinterpret_cast<const char4*>(row_weight + col);
-      const float scale = scales[static_cast<size_t>(row) * groups + col / group_size];
-      sum = fmaf(static_cast<float>(packed.x) * scale, token_input[col], sum);
-      sum = fmaf(static_cast<float>(packed.y) * scale, token_input[col + 1], sum);
-      sum = fmaf(static_cast<float>(packed.z) * scale, token_input[col + 2], sum);
-      sum = fmaf(static_cast<float>(packed.w) * scale, token_input[col + 3], sum);
-    } else {
-      for (int i = col; i < in_features; ++i) {
-        const float scale = scales[static_cast<size_t>(row) * groups + i / group_size];
-        sum = fmaf(static_cast<float>(row_weight[i]) * scale, token_input[i], sum);
-      }
-    }
-  }
-  reduction[threadIdx.x] = sum;
-  __syncthreads();
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride) reduction[threadIdx.x] += reduction[threadIdx.x + stride];
-    __syncthreads();
-  }
-  if (threadIdx.x == 0) output[static_cast<size_t>(token) * out_features + row] = reduction[0];
-}
 
 __global__ void add_bias_kernel(float* output, const float* bias, int n) {
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
@@ -932,8 +859,8 @@ void rms_norm(const float* input, const float* weight, float* output,
 
 void gemv_fp32(const float* weight, const float* bias, const float* input,
                float* output, int out_features, int in_features, cudaStream_t stream) {
-  gemv_kernel<float, false><<<out_features, 256, 0, stream>>>(
-      weight, nullptr, 0, bias, input, output, out_features, in_features);
+  gemv_fp32_kernel<<<out_features, 256, 0, stream>>>(
+      weight, bias, input, output, out_features, in_features);
   INFER_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -949,13 +876,6 @@ void gemv_fp32_cublas(cublasHandle_t handle, const float* weight, const float* b
   INFER_CUDA_CHECK(cudaGetLastError());
 }
 
-void gemv_int8(const int8_t* weight, const float* scales, int group_size,
-               const float* bias, const float* input, float* output,
-               int out_features, int in_features, cudaStream_t stream) {
-  gemv_int8x4_kernel<<<out_features, 256, 0, stream>>>(
-      weight, scales, group_size, bias, input, output, out_features, in_features);
-  INFER_CUDA_CHECK(cudaGetLastError());
-}
 
 void gemm_fp32(const float* weight, const float* input, float* output,
                int tokens, int out_features, int in_features, cudaStream_t stream) {
@@ -966,14 +886,6 @@ void gemm_fp32(const float* weight, const float* input, float* output,
   INFER_CUDA_CHECK(cudaGetLastError());
 }
 
-void gemm_int8(const int8_t* weight, const float* scales, int group_size,
-               const float* input, float* output, int tokens,
-               int out_features, int in_features, cudaStream_t stream) {
-  const dim3 grid(out_features, tokens);
-  gemm_int8x4_kernel<<<grid, 256, 0, stream>>>(
-      weight, scales, group_size, input, output, tokens, out_features, in_features);
-  INFER_CUDA_CHECK(cudaGetLastError());
-}
 
 void rope(float* q, float* k, int num_heads, int num_kv_heads, int head_dim,
           int position, float theta, cudaStream_t stream) {

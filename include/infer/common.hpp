@@ -29,7 +29,7 @@ namespace infer {
 
 enum class Device { kCpu, kCuda };
 enum class DType { kFloat32, kBFloat16, kInt8 };
-enum class Precision { kFloat32, kW8A32, kW16A16, kW8A16 };
+enum class Precision { kFloat32, kW16A16, kW8A16 };
 
 inline const char* to_string(Device v) { return v == Device::kCpu ? "cpu" : "cuda"; }
 inline const char* to_string(DType v) {
@@ -43,7 +43,6 @@ inline const char* to_string(DType v) {
 inline const char* to_string(Precision v) {
   switch (v) {
     case Precision::kFloat32: return "fp32";
-    case Precision::kW8A32: return "w8a32";
     case Precision::kW16A16: return "w16a16";
     case Precision::kW8A16: return "w8a16";
   }
@@ -52,7 +51,6 @@ inline const char* to_string(Precision v) {
 inline const char* archive_filename(Precision v) {
   switch (v) {
     case Precision::kFloat32: return "model.fp32.qbin";
-    case Precision::kW8A32: return "model.int8.qbin";
     case Precision::kW16A16: return "model.w16a16.qbin";
     case Precision::kW8A16: return "model.w8a16.qbin";
   }

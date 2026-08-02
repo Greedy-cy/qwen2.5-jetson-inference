@@ -17,9 +17,6 @@ void linear_fp32(const float* weight, const float* bias, const float* input,
 void linear_fp32_batch(const float* weight, const float* bias, const float* input,
                        float* output, int token_count, int out_features,
                        int in_features);
-void linear_int8(const int8_t* weight, const float* scales, int group_size,
-                 const float* bias, const float* input, float* output,
-                 int out_features, int in_features);
 void rope(float* q, float* k, int num_heads, int num_kv_heads,
           int head_dim, int position, float theta);
 void rope_batch(float* q, float* k, int token_count, int num_heads,

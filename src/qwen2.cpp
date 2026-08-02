@@ -253,36 +253,21 @@ void Qwen2Model::linear_cuda_bf16(
 void Qwen2Model::linear(std::string_view weight_name, std::string_view bias_name,
                         const float* input, float* output, int out_features,
                         int in_features, bool prefer_cublas) {
-  const auto& rec = archive_.record(weight_name);
+  INFER_CHECK(archive_.record(weight_name).dtype == DType::kFloat32,
+              "FP32 data path requires float32 weights");
   const float* bias = optional_float_weight(bias_name);
   if (options_.backend == Device::kCpu) {
-    if (rec.dtype == DType::kFloat32) {
-      cpu::linear_fp32(static_cast<const float*>(weight(weight_name)), bias, input, output,
-                       out_features, in_features);
-    } else {
-      INFER_CHECK(rec.quant.has_value(), "int8 tensor lacks quantization metadata");
-      cpu::linear_int8(static_cast<const int8_t*>(weight(weight_name)),
-                       float_weight(rec.quant->scale_tensor), rec.quant->group_size,
-                       bias, input, output, out_features, in_features);
-    }
+    cpu::linear_fp32(float_weight(weight_name), bias, input, output,
+                     out_features, in_features);
     return;
   }
-  if (rec.dtype == DType::kFloat32) {
-    if (prefer_cublas || options_.linear_kernel == LinearKernel::kCublas) {
-      cuda::gemv_fp32_cublas(cuda_context_->cublas(),
-                             static_cast<const float*>(weight(weight_name)), bias,
-                             input, output, out_features, in_features,
-                             cuda_context_->stream());
-    } else {
-      cuda::gemv_fp32(static_cast<const float*>(weight(weight_name)), bias, input, output,
-                      out_features, in_features, cuda_context_->stream());
-    }
+  if (prefer_cublas || options_.linear_kernel == LinearKernel::kCublas) {
+    cuda::gemv_fp32_cublas(
+        cuda_context_->cublas(), float_weight(weight_name), bias, input,
+        output, out_features, in_features, cuda_context_->stream());
   } else {
-    INFER_CHECK(rec.quant.has_value(), "int8 tensor lacks quantization metadata");
-    cuda::gemv_int8(static_cast<const int8_t*>(weight(weight_name)),
-                    float_weight(rec.quant->scale_tensor), rec.quant->group_size,
-                    bias, input, output, out_features, in_features,
-                    cuda_context_->stream());
+    cuda::gemv_fp32(float_weight(weight_name), bias, input, output,
+                    out_features, in_features, cuda_context_->stream());
   }
 }
 
@@ -337,27 +322,16 @@ void Qwen2Model::linear_cuda_batch(
     std::string_view weight_name, std::string_view bias_name,
     const float* input, float* output, int token_count, int out_features,
     int in_features) {
-  INFER_CHECK(options_.backend == Device::kCuda,
-              "batched CUDA linear requires CUDA backend");
-  const auto& rec = archive_.record(weight_name);
-  if (rec.dtype == DType::kFloat32) {
-    if (options_.linear_kernel == LinearKernel::kCublas) {
-      cuda::gemm_fp32_cublas(
-          cuda_context_->cublas(),
-          static_cast<const float*>(weight(weight_name)), input, output,
-          token_count, out_features, in_features, cuda_context_->stream());
-    } else {
-      cuda::gemm_fp32(static_cast<const float*>(weight(weight_name)), input,
-                      output, token_count, out_features, in_features,
-                      cuda_context_->stream());
-    }
+  INFER_CHECK(options_.backend == Device::kCuda &&
+                  archive_.record(weight_name).dtype == DType::kFloat32,
+              "batched CUDA FP32 linear requires float32 weights");
+  if (options_.linear_kernel == LinearKernel::kCublas) {
+    cuda::gemm_fp32_cublas(
+        cuda_context_->cublas(), float_weight(weight_name), input, output,
+        token_count, out_features, in_features, cuda_context_->stream());
   } else {
-    INFER_CHECK(rec.quant.has_value(), "int8 tensor lacks quantization metadata");
-    cuda::gemm_int8(
-        static_cast<const int8_t*>(weight(weight_name)),
-        float_weight(rec.quant->scale_tensor), rec.quant->group_size, input,
-        output, token_count, out_features, in_features,
-        cuda_context_->stream());
+    cuda::gemm_fp32(float_weight(weight_name), input, output, token_count,
+                    out_features, in_features, cuda_context_->stream());
   }
   const float* bias = optional_float_weight(bias_name);
   if (bias) {

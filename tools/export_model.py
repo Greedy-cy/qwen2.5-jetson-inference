@@ -344,30 +344,6 @@ def export(source: Path, destination: Path, precision: str, group_size: int) -> 
                             "mean_abs_error": mean_error,
                         }
                     )
-                elif precision == "int8" and should_quantize(tensor.name, array):
-                    q, scales, max_error, mean_error = quantize_groupwise(array, group_size)
-                    scale_name = tensor.name + ".scale"
-                    write_tensor(
-                        output,
-                        records,
-                        tensor.name,
-                        q,
-                        "int8",
-                        {
-                            "scheme": "symmetric_group_w8a32",
-                            "group_size": group_size,
-                            "axis": 1,
-                            "scale_tensor": scale_name,
-                        },
-                    )
-                    write_tensor(output, records, scale_name, scales, "float32")
-                    quantization.append(
-                        {
-                            "name": tensor.name,
-                            "max_abs_error": max_error,
-                            "mean_abs_error": mean_error,
-                        }
-                    )
                 else:
                     write_tensor(output, records, tensor.name, array.astype(np.float32, copy=False), "float32")
                 print(f"[{index:3d}/{len(tensors)}] {tensor.name} {tensor.shape}", flush=True)
@@ -377,7 +353,7 @@ def export(source: Path, destination: Path, precision: str, group_size: int) -> 
                 "version": VERSION,
                 "source": str(source),
                 "precision": precision,
-                "group_size": group_size if precision in ("int8", "w8a16") else None,
+                "group_size": group_size if precision == "w8a16" else None,
                 "tensors": records,
             }
             encoded = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -554,7 +530,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--precision",
-        choices=("fp32", "int8", "w16a16", "w8a16", "all"),
+        choices=("fp32", "w16a16", "w8a16", "all"),
         default="all",
     )
     parser.add_argument("--group-size", type=int, default=64)
@@ -576,8 +552,6 @@ def main() -> None:
     reports = []
     if args.precision in ("fp32", "all"):
         reports.append(export(args.source, args.output / "model.fp32.qbin", "fp32", args.group_size))
-    if args.precision in ("int8", "all"):
-        reports.append(export(args.source, args.output / "model.int8.qbin", "int8", args.group_size))
     if args.precision in ("w16a16", "all"):
         reports.append(
             export(

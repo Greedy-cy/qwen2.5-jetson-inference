@@ -29,24 +29,6 @@ void linear_fp32(const float* weight, const float* bias, const float* input,
   }
 }
 
-void linear_int8(const int8_t* weight, const float* scales, int group_size,
-                 const float* bias, const float* input, float* output,
-                 int out_features, int in_features) {
-  const int groups = (in_features + group_size - 1) / group_size;
-  for (int row = 0; row < out_features; ++row) {
-    float sum = bias ? bias[row] : 0.0f;
-    for (int group = 0; group < groups; ++group) {
-      const int begin = group * group_size;
-      const int end = std::min(begin + group_size, in_features);
-      float partial = 0.0f;
-      for (int col = begin; col < end; ++col) {
-        partial += static_cast<float>(weight[static_cast<size_t>(row) * in_features + col]) * input[col];
-      }
-      sum += partial * scales[static_cast<size_t>(row) * groups + group];
-    }
-    output[row] = sum;
-  }
-}
 
 void rope(float* q, float* k, int num_heads, int num_kv_heads,
           int head_dim, int position, float theta) {

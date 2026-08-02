@@ -30,14 +30,8 @@ void gemv_fp32(const float* weight, const float* bias, const float* input,
 void gemv_fp32_cublas(cublasHandle_t handle, const float* weight, const float* bias,
                       const float* input, float* output, int out_features,
                       int in_features, cudaStream_t stream);
-void gemv_int8(const int8_t* weight, const float* scales, int group_size,
-               const float* bias, const float* input, float* output,
-               int out_features, int in_features, cudaStream_t stream);
 void gemm_fp32(const float* weight, const float* input, float* output,
                int tokens, int out_features, int in_features, cudaStream_t stream);
-void gemm_int8(const int8_t* weight, const float* scales, int group_size,
-               const float* input, float* output, int tokens,
-               int out_features, int in_features, cudaStream_t stream);
 void rope(float* q, float* k, int num_heads, int num_kv_heads, int head_dim,
           int position, float theta, cudaStream_t stream);
 void store_kv(const float* key, const float* value, float* key_cache,

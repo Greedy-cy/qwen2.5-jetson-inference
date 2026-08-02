@@ -43,15 +43,12 @@ void usage() {
       "Qwen2.5 C++/CUDA inference\n\n"
       "Usage:\n"
       "  llm_infer generate --model DIR (--prompt TEXT | --token-ids CSV) [--backend cpu|cuda]\n"
-      "                     [--precision fp32|w8a32|w16a16|w8a16] [--max-new-tokens 128]\n"
+      "                     [--precision fp32|w16a16|w8a16] [--max-new-tokens 128]\n"
       "                     [--max-seq-len 2048] [--system TEXT] [--raw]\n"
-      "                     [--linear-kernel custom|cublas] [--cublas]\n"
+      "                     [--linear-kernel custom|cublas]\n"
       "  llm_infer benchmark --model DIR (--prompt TEXT | --token-ids CSV)\n"
       "                      [--warmup 5] [--repeat 20] [--json FILE]\n"
-      "                      [--telemetry-markers] [other generation options]\n"
-      "  llm_infer inspect --model DIR [--precision fp32|w8a32|w16a16|w8a16] [--max-seq-len 2048]\n"
-      "  llm_infer tokenize --model DIR --text TEXT [--chat]\n"
-      "  llm_infer logits --model DIR (--prompt TEXT | --token-ids CSV) --output FILE\n";
+      "                      [--telemetry-markers] [other generation options]\n";
 }
 
 Device parse_device(const std::string& text) {
@@ -68,11 +65,9 @@ LinearKernel parse_linear_kernel(const std::string& text) {
 
 Precision parse_precision(const std::string& text) {
   if (text == "fp32") return Precision::kFloat32;
-  if (text == "w8a32" || text == "int8") return Precision::kW8A32;
   if (text == "w16a16") return Precision::kW16A16;
   if (text == "w8a16") return Precision::kW8A16;
-  throw infer::Error(
-      "precision must be fp32, w8a32, w16a16, or w8a16 (int8 is a w8a32 alias)");
+  throw infer::Error("precision must be fp32, w16a16, or w8a16");
 }
 
 infer::RuntimeOptions runtime_options(const Arguments& args) {
@@ -81,12 +76,9 @@ infer::RuntimeOptions runtime_options(const Arguments& args) {
   options.precision = parse_precision(args.get("--precision", "fp32"));
   options.max_sequence_length = args.get_int("--max-seq-len", 2048);
   const std::string linear_kernel = args.get("--linear-kernel");
-  INFER_CHECK(linear_kernel.empty() || !args.has("--cublas"),
-              "--linear-kernel and legacy --cublas cannot be used together");
   if (!linear_kernel.empty()) {
     options.linear_kernel = parse_linear_kernel(linear_kernel);
-  } else if (args.has("--cublas") ||
-             options.precision == Precision::kW16A16 ||
+  } else if (options.precision == Precision::kW16A16 ||
              options.precision == Precision::kW8A16) {
     options.linear_kernel = LinearKernel::kCublas;
   }
@@ -163,52 +155,7 @@ std::string environment_value(const char* name) {
   return value != nullptr && value[0] != '\0' ? value : "library_default";
 }
 
-void inspect(const Arguments& args) {
-  const std::filesystem::path directory = args.get("--model");
-  if (directory.empty()) throw infer::Error("--model is required");
-  const auto precision = parse_precision(args.get("--precision", "fp32"));
-  const auto config = infer::ModelConfig::load(directory / "config.json");
-  const auto archive_path = directory / infer::archive_filename(precision);
-  infer::ModelArchive archive(archive_path);
-  size_t quantized = 0;
-  size_t bfloat16 = 0;
-  size_t payload = 0;
-  for (const auto& rec : archive.records()) {
-    payload += rec.nbytes;
-    if (rec.dtype == infer::DType::kInt8) ++quantized;
-    if (rec.dtype == infer::DType::kBFloat16) ++bfloat16;
-  }
-  const int max_seq = args.get_int("--max-seq-len", 2048);
-  const auto kv_dtype = (precision == Precision::kW16A16 ||
-                         precision == Precision::kW8A16)
-                            ? infer::DType::kBFloat16
-                            : infer::DType::kFloat32;
-  const size_t kv_bytes = 2ULL * config.num_layers * config.num_kv_heads * max_seq *
-                          config.head_dim() * infer::dtype_size(kv_dtype);
-  std::cout << "archive: " << archive_path << '\n'
-            << "layers: " << config.num_layers << ", hidden: " << config.hidden_size
-            << ", intermediate: " << config.intermediate_size << '\n'
-            << "heads: " << config.num_heads << " Q / " << config.num_kv_heads
-            << " KV, head_dim: " << config.head_dim() << '\n'
-            << "vocab: " << config.vocab_size << '\n'
-            << "tensors: " << archive.records().size() << " (int8: " << quantized
-            << ", bfloat16: " << bfloat16 << ")\n"
-            << "payload MiB: " << std::fixed << std::setprecision(2)
-            << payload / 1048576.0 << '\n'
-            << "KV cache MiB @ " << max_seq << ": " << kv_bytes / 1048576.0 << '\n';
-}
 
-void tokenize(const Arguments& args) {
-  const std::filesystem::path directory = args.get("--model");
-  if (directory.empty()) throw infer::Error("--model is required");
-  std::string text = args.get("--text");
-  if (text.empty()) throw infer::Error("--text is required");
-  infer::QwenTokenizer tokenizer(directory / "tokenizer.json");
-  if (args.has("--chat")) text = tokenizer.apply_chat_template(text);
-  const auto ids = tokenizer.encode(text, true);
-  nlohmann::json report{{"text", text}, {"ids", ids}, {"decoded", tokenizer.decode(ids)}};
-  std::cout << report.dump(2) << '\n';
-}
 
 void generate(const Arguments& args) {
   const std::filesystem::path directory = args.get("--model");
@@ -233,25 +180,6 @@ void generate(const Arguments& args) {
   }
 }
 
-void logits(const Arguments& args) {
-  const std::filesystem::path directory = args.get("--model");
-  const std::filesystem::path output_path = args.get("--output");
-  if (directory.empty() || output_path.empty()) throw infer::Error("--model and --output are required");
-  infer::QwenTokenizer tokenizer(directory / "tokenizer.json");
-  const auto token_ids = args.get("--token-ids");
-  const auto prompt = token_ids.empty() ? make_prompt(args, tokenizer) : parse_token_ids(token_ids);
-  infer::Qwen2Model model(directory, runtime_options(args));
-  model.reset();
-  const int top1 = model.prefill(prompt);
-  const auto values = model.last_logits_host();
-  std::filesystem::create_directories(output_path.parent_path());
-  std::ofstream output(output_path, std::ios::binary);
-  output.write(reinterpret_cast<const char*>(values.data()),
-               static_cast<std::streamsize>(values.size() * sizeof(float)));
-  INFER_CHECK(output.good(), "failed to write logits file");
-  std::cout << "top1=" << top1 << " logits=" << values.size()
-            << " output=" << output_path << '\n';
-}
 
 void benchmark(const Arguments& args) {
   const std::filesystem::path directory = args.get("--model");
@@ -373,9 +301,6 @@ int main(int argc, char** argv) {
     const Arguments args(argc, argv);
     if (args.command() == "generate") generate(args);
     else if (args.command() == "benchmark") benchmark(args);
-    else if (args.command() == "inspect") inspect(args);
-    else if (args.command() == "tokenize") tokenize(args);
-    else if (args.command() == "logits") logits(args);
     else { usage(); return args.command() == "help" ? 0 : 1; }
     return 0;
   } catch (const std::exception& error) {

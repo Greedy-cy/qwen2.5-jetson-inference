@@ -27,8 +27,6 @@ CANONICAL_TOKEN_IDS = [
 ]
 ARCHIVE_NAMES = {
     "fp32": "model.fp32.qbin",
-    "int8": "model.int8.qbin",
-    "w8a32": "model.int8.qbin",
     "w16a16": "model.w16a16.qbin",
     "w8a16": "model.w8a16.qbin",
 }
@@ -374,7 +372,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-telemetry", action="store_true")
     parser.add_argument("--lock-clocks", action="store_true")
     parser.add_argument("--allow-dirty", action="store_true")
-    parser.add_argument("--cublas", action="store_true")
+    parser.add_argument("--linear-kernel", choices=("custom", "cublas"))
     return parser.parse_args()
 
 
@@ -393,18 +391,17 @@ def main() -> None:
     provenance = collect_provenance(root, model, args.precision)
     if provenance["git_dirty"] and not args.allow_dirty:
         raise RuntimeError("refusing to benchmark a dirty worktree; use --allow-dirty for smoke tests")
-    runtime_precision = "int8" if args.precision == "w8a32" else args.precision
     command = [
         str(binary), "benchmark", "--model", str(model),
-        "--backend", args.backend, "--precision", runtime_precision,
+        "--backend", args.backend, "--precision", args.precision,
         "--token-ids", args.token_ids,
         "--max-new-tokens", str(args.max_new_tokens),
         "--max-seq-len", str(args.max_seq_len),
         "--warmup", str(args.warmup), "--repeat", str(args.repeat),
         "--telemetry-markers",
     ]
-    if args.cublas:
-        command.append("--cublas")
+    if args.linear_kernel:
+        command.extend(["--linear-kernel", args.linear_kernel])
     sampler = TelemetrySampler(args.telemetry_interval_ms, not args.no_telemetry)
     with ClockGuard(args.lock_clocks):
         sampler.start()

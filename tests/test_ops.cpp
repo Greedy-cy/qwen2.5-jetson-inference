@@ -43,15 +43,6 @@ TEST(CpuOps, BatchedFp32LinearMatchesGemvRows) {
   }
 }
 
-TEST(CpuOps, Int8LinearMatchesDequantized) {
-  const int8_t weight[] = {1, -2, 3, -4, 5, 6, -7, 8};
-  const float scales[] = {0.25f, 0.5f, 0.1f, 0.2f};
-  const float input[] = {1, 2, 3, 4};
-  float output[2]{};
-  infer::cpu::linear_int8(weight, scales, 2, nullptr, input, output, 2, 4);
-  EXPECT_NEAR(output[0], (1 * 1 - 2 * 2) * 0.25f + (3 * 3 - 4 * 4) * 0.5f, 1e-6f);
-  EXPECT_NEAR(output[1], (5 * 1 + 6 * 2) * 0.1f + (-7 * 3 + 8 * 4) * 0.2f, 1e-6f);
-}
 
 TEST(CpuOps, RopePositionZeroIsIdentity) {
   float q[] = {1, 2, 3, 4};
