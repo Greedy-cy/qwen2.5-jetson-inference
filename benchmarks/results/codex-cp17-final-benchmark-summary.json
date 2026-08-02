@@ -1,0 +1,188 @@
+{
+  "schema": "codex.checkpoint-report.v1",
+  "checkpoint": "CP17",
+  "title": "Final concentrated benchmark",
+  "data_commit": "f7d44b948b93c5637fc6d06f533d963311427614",
+  "target": {
+    "device": "Jetson Orin Nano Super 8GB",
+    "jetson_linux": "R36.4.7",
+    "architecture": "aarch64",
+    "cuda": "12.6",
+    "cuda_architecture": 87,
+    "power_mode": "MAXN_SUPER"
+  },
+  "protocol": {
+    "batch_size": 1,
+    "prefill_implementation": "matrixized",
+    "decoding": "greedy_argmax",
+    "canonical": {
+      "prompt_tokens": 32,
+      "generated_tokens": 128,
+      "max_sequence_length": 256,
+      "warmup": 5,
+      "repeat": 20
+    },
+    "prompt_sweep": {
+      "prompt_tokens": [1, 32, 128, 512],
+      "generated_tokens": 1,
+      "max_sequence_length": 512,
+      "warmup": 5,
+      "repeat": 20
+    },
+    "telemetry_interval_ms": 100,
+    "clocks_locked_and_restored": true,
+    "cpu_threads": 6,
+    "cpu_affinity": "0-5"
+  },
+  "model_archives": {
+    "fp32": {
+      "sha256": "a58918c8fcbe0332c3a09d233f14425d1ecf32facca658b92203ff89d81c0b63",
+      "bytes": 1977179648,
+      "mib": 1885.59
+    },
+    "w16a16_bfloat16": {
+      "sha256": "f8b6b16a3a85d70083bfd7f822a7d587332982b0f0e27691512efa844855b2a6",
+      "bytes": 989114112,
+      "mib": 943.29
+    },
+    "w8a16": {
+      "sha256": "730d0ca9a60b55a63534c8edce19353d8f55fda07e6e5fc04ec88470bcf57814",
+      "bytes": 642469632,
+      "mib": 612.71
+    }
+  },
+  "canonical": {
+    "cpu_fp32": {
+      "ttft_ms": {"mean": 354.667394, "p50": 353.931111, "p95": 358.762331, "cv_percent": 0.551720},
+      "prefill_tokens_per_second": {"mean": 90.228113, "cv_percent": 0.549300},
+      "decode_tokens_per_second": {"mean": 13.422835, "p50": 13.431535, "p95": 13.451157, "cv_percent": 0.225250},
+      "tpot_ms_mean": 74.500292,
+      "total_ms_mean": 9816.205880,
+      "power_w_mean": 13.111918,
+      "power_w_max": 13.224,
+      "energy_per_generated_token_joules": 1.005273,
+      "peak_rss_mib": 2077.94,
+      "device_weights_mib": 0.0,
+      "workspace_mib": 19.53,
+      "kv_cache_mib": 6.0
+    },
+    "cuda_fp32": {
+      "ttft_ms": {"mean": 494.870328, "p50": 494.869196, "p95": 494.959585, "cv_percent": 0.012227},
+      "prefill_tokens_per_second": {"mean": 64.663405, "cv_percent": 0.012227},
+      "decode_tokens_per_second": {"mean": 22.864482, "p50": 22.864908, "p95": 22.868524, "cv_percent": 0.012439},
+      "tpot_ms_mean": 43.735957,
+      "total_ms_mean": 6049.337744,
+      "power_w_mean": 14.455264,
+      "power_w_max": 14.853,
+      "energy_per_generated_token_joules": 0.681950,
+      "peak_rss_mib": 3922.09,
+      "device_weights_mib": 1884.59,
+      "workspace_mib": 19.53,
+      "kv_cache_mib": 6.0
+    },
+    "cuda_w16a16_bfloat16": {
+      "ttft_ms": {"mean": 16.830269, "p50": 16.829110, "p95": 16.846199, "cv_percent": 0.058396},
+      "prefill_tokens_per_second": {"mean": 1901.336911, "cv_percent": 0.058393},
+      "decode_tokens_per_second": {"mean": 67.610957, "p50": 67.610086, "p95": 67.619593, "cv_percent": 0.009125},
+      "tpot_ms_mean": 14.790502,
+      "total_ms_mean": 1895.224533,
+      "power_w_mean": 18.070729,
+      "power_w_max": 18.270,
+      "energy_per_generated_token_joules": 0.267059,
+      "peak_rss_mib": 2351.48,
+      "device_weights_mib": 942.29,
+      "workspace_mib": 9.77,
+      "kv_cache_mib": 3.0
+    },
+    "cuda_w8a16": {
+      "ttft_ms": {"mean": 758.955875, "p50": 758.959487, "p95": 759.038674, "cv_percent": 0.009802},
+      "prefill_tokens_per_second": {"mean": 42.163189, "cv_percent": 0.009803},
+      "decode_tokens_per_second": {"mean": 33.573023, "p50": 33.571614, "p95": 33.577525, "cv_percent": 0.011836},
+      "tpot_ms_mean": 29.785820,
+      "total_ms_mean": 4541.755596,
+      "power_w_mean": 14.725910,
+      "power_w_max": 14.829,
+      "energy_per_generated_token_joules": 0.521679,
+      "peak_rss_mib": 1672.14,
+      "device_weights_mib": 611.71,
+      "workspace_mib": 9.77,
+      "kv_cache_mib": 3.0
+    }
+  },
+  "prompt_sweep": {
+    "cpu_fp32": [
+      {"prompt_tokens": 1, "ttft_ms_mean": 130.589154, "ttft_cv_percent": 2.191628, "prefill_tokens_per_second_mean": 7.661026},
+      {"prompt_tokens": 32, "ttft_ms_mean": 361.913575, "ttft_cv_percent": 0.813043, "prefill_tokens_per_second_mean": 88.424651},
+      {"prompt_tokens": 128, "ttft_ms_mean": 1136.511588, "ttft_cv_percent": 0.385281, "prefill_tokens_per_second_mean": 112.626993},
+      {"prompt_tokens": 512, "ttft_ms_mean": 6666.622666, "ttft_cv_percent": 0.163786, "prefill_tokens_per_second_mean": 76.800713}
+    ],
+    "cuda_fp32": [
+      {"prompt_tokens": 1, "ttft_ms_mean": 254.264862, "ttft_cv_percent": 0.011094, "prefill_tokens_per_second_mean": 3.932907},
+      {"prompt_tokens": 32, "ttft_ms_mean": 494.701871, "ttft_cv_percent": 0.007177, "prefill_tokens_per_second_mean": 64.685424},
+      {"prompt_tokens": 128, "ttft_ms_mean": 1950.666205, "ttft_cv_percent": 0.008739, "prefill_tokens_per_second_mean": 65.618608},
+      {"prompt_tokens": 512, "ttft_ms_mean": 8043.978420, "ttft_cv_percent": 0.007725, "prefill_tokens_per_second_mean": 63.650097}
+    ],
+    "cuda_w16a16_bfloat16": [
+      {"prompt_tokens": 1, "ttft_ms_mean": 14.317636, "ttft_cv_percent": 0.066321, "prefill_tokens_per_second_mean": 69.843961},
+      {"prompt_tokens": 32, "ttft_ms_mean": 16.818572, "ttft_cv_percent": 0.070697, "prefill_tokens_per_second_mean": 1902.659507},
+      {"prompt_tokens": 128, "ttft_ms_mean": 46.059372, "ttft_cv_percent": 0.030524, "prefill_tokens_per_second_mean": 2779.022110},
+      {"prompt_tokens": 512, "ttft_ms_mean": 455.480265, "ttft_cv_percent": 0.024660, "prefill_tokens_per_second_mean": 1124.088288}
+    ],
+    "cuda_w8a16": [
+      {"prompt_tokens": 1, "ttft_ms_mean": 29.288808, "ttft_cv_percent": 0.029099, "prefill_tokens_per_second_mean": 34.142738},
+      {"prompt_tokens": 32, "ttft_ms_mean": 758.719283, "ttft_cv_percent": 0.007741, "prefill_tokens_per_second_mean": 42.176337},
+      {"prompt_tokens": 128, "ttft_ms_mean": 3036.161751, "ttft_cv_percent": 0.006847, "prefill_tokens_per_second_mean": 42.158492},
+      {"prompt_tokens": 512, "ttft_ms_mean": 12424.897016, "ttft_cv_percent": 0.006661, "prefill_tokens_per_second_mean": 41.207585}
+    ]
+  },
+  "comparisons": {
+    "cuda_fp32_vs_cpu_fp32": {"decode_speedup": 1.703402, "prefill_speedup": 0.716666, "total_latency_speedup": 1.622691},
+    "w16a16_vs_cuda_fp32": {"decode_speedup": 2.957030, "prefill_speedup": 29.403600, "ttft_reduction_percent": 96.599055, "energy_reduction_percent": 60.838861},
+    "w8a16_vs_w16a16": {"decode_speedup": 0.496562, "prefill_speedup": 0.022176, "ttft_ratio": 45.094698, "device_weight_reduction_percent": 35.083147},
+    "w8a16_vs_cuda_fp32": {"decode_speedup": 1.468348, "prefill_speedup": 0.652041, "device_weight_reduction_percent": 67.541573, "energy_reduction_percent": 23.501827}
+  },
+  "nsight_systems": {
+    "version": "2024.5.4.34-245434855735v0",
+    "workload": {"prompt_tokens": 32, "generated_tokens": 16, "warmup": 1, "repeat": 3},
+    "cuda_fp32": {
+      "top_kernels": [
+        {"name": "gemv_fp32_kernel", "gpu_kernel_time_percent": 47.8},
+        {"name": "gemm_tiled_kernel", "gpu_kernel_time_percent": 41.9}
+      ],
+      "nvtx_prefill_median_ms": 494.911920,
+      "nvtx_decode_token_median_ms": 44.844752
+    },
+    "cuda_w16a16_bfloat16": {
+      "top_kernel_group": "Ampere BF16 GEMM",
+      "gpu_kernel_time_percent": 82.9,
+      "nvtx_prefill_median_ms": 17.184800,
+      "nvtx_decode_token_median_ms": 15.046656
+    },
+    "cuda_w8a16": {
+      "top_kernel": "linear_w8a16_kernel",
+      "gpu_kernel_time_percent": 94.3,
+      "nvtx_prefill_median_ms": 795.467760,
+      "nvtx_decode_token_median_ms": 30.903248
+    },
+    "cuda_malloc_calls_per_trace": 9,
+    "per_token_cuda_malloc_observed": false
+  },
+  "acceptance": {
+    "all_canonical_decode_cv_le_3_percent": true,
+    "all_sweep_ttft_cv_le_3_percent": true,
+    "w16a16_decode_faster_than_cuda_fp32": true,
+    "w16a16_prefill_faster_at_all_sweep_lengths": true,
+    "w8a16_device_weights_smaller_than_w16a16": true,
+    "w8a16_decode_faster_than_w16a16": false,
+    "w8a16_prefill_faster_than_w16a16": false,
+    "cp17_measurement_complete": true,
+    "w8a16_performance_gate_passed": false,
+    "next_bottleneck": "linear_w8a16_kernel"
+  },
+  "raw_results": {
+    "canonical": "results/codex-cp17-canonical-*.json",
+    "prompt_sweep": "results/codex-cp17-sweep-*.json",
+    "nsight_reports": "results/codex-cp17-nsys-*.nsys-rep",
+    "version_controlled": false
+  }
+}
