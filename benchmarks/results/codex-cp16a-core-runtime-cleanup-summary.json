@@ -1,0 +1,85 @@
+{
+  "schema_version": "1.0",
+  "artifact_type": "audited_core_cleanup_summary",
+  "checkpoint": "16A",
+  "name": "core_runtime_cleanup",
+  "status": "pass",
+  "implementation_commit": "83fb4145eb345757e88a91f6108923759d0c1de8",
+  "retained_paths": [
+    {"backend": "cpu", "precision": "fp32"},
+    {"backend": "cuda", "precision": "fp32"},
+    {"backend": "cuda", "precision": "w16a16", "activation_dtype": "bfloat16"},
+    {"backend": "cuda", "precision": "w8a16", "activation_dtype": "bfloat16", "weight_dtype": "int8"}
+  ],
+  "public_commands": ["generate", "benchmark"],
+  "removed": {
+    "runtime_precision": "w8a32",
+    "precision_alias": "int8",
+    "commands": ["inspect", "tokenize", "logits"],
+    "legacy_option": "--cublas",
+    "cpu_apis": ["linear_int8"],
+    "cuda_apis": ["gemv_int8", "gemm_int8"],
+    "cuda_kernels": ["gemv_int8x4_kernel", "gemm_int8x4_kernel"],
+    "tools": ["tools/reference.py", "tools/validate_parity.py"],
+    "dependency_file": "requirements-reference.txt",
+    "generated_archive": {
+      "path": "models/qwen2.5-0.5b-instruct/model.int8.qbin",
+      "bytes": 926064128,
+      "recoverable_from_commit": "dc551a1"
+    }
+  },
+  "retained_int8_dtype_reason": "W8A16 Linear weights remain INT8",
+  "exported_archives": [
+    "model.fp32.qbin",
+    "model.w16a16.qbin",
+    "model.w8a16.qbin"
+  ],
+  "code_size": {
+    "net_lines_removed": 462,
+    "core_file_lines": [
+      {"file": "src/main.cpp", "before": 385, "after": 310},
+      {"file": "src/qwen2.cpp", "before": 947, "after": 921},
+      {"file": "src/cpu_ops.cpp", "before": 197, "after": 179},
+      {"file": "src/cuda/kernels.cu", "before": 1297, "after": 1209},
+      {"file": "tools/export_model.py", "before": 605, "after": 579},
+      {"file": "tools/run_benchmark.py", "before": 447, "after": 444}
+    ]
+  },
+  "tests": {
+    "release_build": "pass",
+    "full_passed": 28,
+    "full_failed": 0,
+    "active_w8a32_source_references": 0,
+    "cli_only_generate_and_benchmark": true,
+    "legacy_commands_rejected": true,
+    "legacy_precision_rejected": true
+  },
+  "real_model_smoke_diagnostic_only": [
+    {"backend": "cpu", "precision": "fp32", "prompt_tokens": 1, "generated_tokens": 1, "ttft_ms": 1042.02, "tokens": [271]},
+    {"backend": "cuda", "precision": "fp32", "prompt_tokens": 1, "generated_tokens": 1, "ttft_ms": 129.04, "tokens": [271]},
+    {"backend": "cuda", "precision": "w16a16", "prompt_tokens": 32, "generated_tokens": 4, "ttft_ms": 201.46, "decode_tokens_per_second": 38.16, "tokens": [80285, 12, 4086, 44]},
+    {"backend": "cuda", "precision": "w8a16", "prompt_tokens": 32, "generated_tokens": 4, "ttft_ms": 1000.31, "decode_tokens_per_second": 30.85, "tokens": [80285, 12, 4086, 44]}
+  ],
+  "benchmark_runner_smoke": {
+    "precision": "w16a16",
+    "linear_kernel": "cublas",
+    "prompt_tokens": 32,
+    "generated_tokens": 2,
+    "warmup": 0,
+    "repeat": 1,
+    "ttft_ms": 168.871209,
+    "decode_tokens_per_second": 30.7981554491931,
+    "formal_benchmark": false
+  },
+  "jetson_memory_note": {
+    "initial_cuda_malloc_oom": true,
+    "cause": "model file page cache reduced NvMap large-allocation headroom",
+    "cached_model_files_gib_approx": 3.1,
+    "mitigation": "POSIX_FADV_DONTNEED on the three read-only archive files",
+    "system_drop_caches_used": false,
+    "model_files_modified": false,
+    "retry_passed": true
+  },
+  "historical_checkpoint_reports_retained": true,
+  "formal_w8a16_performance_deferred_to_checkpoint": 17
+}
