@@ -2,9 +2,7 @@
 
 #include "infer/cpu_ops.hpp"
 
-#ifdef INFER_WITH_NVTX
 #include <nvToolsExt.h>
-#endif
 
 namespace infer {
 namespace {
@@ -16,16 +14,10 @@ size_t align_up(size_t value, size_t alignment = 256) {
 class ProfileRange {
  public:
   explicit ProfileRange(const char* name) {
-#ifdef INFER_WITH_NVTX
     nvtxRangePushA(name);
-#else
-    (void)name;
-#endif
   }
   ~ProfileRange() {
-#ifdef INFER_WITH_NVTX
     nvtxRangePop();
-#endif
   }
 };
 

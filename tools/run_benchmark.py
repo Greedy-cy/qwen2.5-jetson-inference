@@ -8,7 +8,6 @@ import hashlib
 import json
 import math
 import os
-import platform
 import re
 import statistics
 import subprocess
@@ -307,24 +306,30 @@ def collect_provenance(root: Path, model: Path, precision: str) -> dict[str, Any
     archive = archive_for(model, precision)
     if not archive.is_file():
         raise RuntimeError(f"model archive not found: {archive}")
+    architecture = run_text(["uname", "-m"], check=True)
+    if architecture != "aarch64":
+        raise RuntimeError("benchmark runner requires Jetson Linux on aarch64")
+    tegra_release = Path("/etc/nv_tegra_release")
+    if not tegra_release.is_file():
+        raise RuntimeError("benchmark runner requires NVIDIA Jetson Linux")
     default_nvcc = Path("/usr/local/cuda/bin/nvcc")
     nvcc = str(default_nvcc) if default_nvcc.is_file() else "nvcc"
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": run_text(["git", "rev-parse", "HEAD"], cwd=root, check=True),
         "git_dirty": bool(status),
-        "hostname": platform.node(),
-        "platform": platform.platform(),
-        "python": platform.python_version(),
+        "hostname": run_text(["hostname"], check=True),
+        "architecture": architecture,
+        "python": sys.version.split()[0],
         "model_directory": str(model.resolve()),
         "model_archive": str(archive.resolve()),
         "model_archive_sha256": sha256_file(archive),
         "canonical_token_ids_sha256": hashlib.sha256(
             json.dumps(CANONICAL_TOKEN_IDS, separators=(",", ":")).encode()
         ).hexdigest(),
-        "nvidia_tegra_release": Path("/etc/nv_tegra_release").read_text(
+        "nvidia_tegra_release": tegra_release.read_text(
             encoding="utf-8", errors="replace"
-        ).strip() if Path("/etc/nv_tegra_release").exists() else "unavailable",
+        ).strip(),
         "cuda_compiler": run_text([nvcc, "--version"]),
         "power_mode": run_text(["nvpmodel", "-q"]),
         "cmake": run_text(["cmake", "--version"]).splitlines()[0],

@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
 project(qwen_inference LANGUAGES CXX CUDA)
 
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+   NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  message(FATAL_ERROR "This runtime targets Jetson Orin Nano (Linux/aarch64) only")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
@@ -11,9 +16,8 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 87)
-endif()
+set(CMAKE_CUDA_ARCHITECTURES 87 CACHE STRING
+    "Jetson Orin Nano Ampere architecture" FORCE)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -37,17 +41,12 @@ add_library(infer_core
 
 target_include_directories(infer_core PUBLIC include)
 target_link_libraries(infer_core
-  PUBLIC nlohmann_json::nlohmann_json CUDA::cudart CUDA::cublas ${BLAS_LIBRARIES})
+  PUBLIC nlohmann_json::nlohmann_json CUDA::cudart CUDA::cublas
+         CUDA::nvToolsExt ${BLAS_LIBRARIES})
 target_compile_options(infer_core PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>
   $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math -lineinfo>)
-target_compile_definitions(infer_core PUBLIC INFER_WITH_CUDA=1)
 set_target_properties(infer_core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-if(TARGET CUDA::nvToolsExt)
-  target_link_libraries(infer_core PUBLIC CUDA::nvToolsExt)
-  target_compile_definitions(infer_core PUBLIC INFER_WITH_NVTX=1)
-endif()
 
 add_executable(llm_infer src/main.cpp)
 target_link_libraries(llm_infer PRIVATE infer_core)

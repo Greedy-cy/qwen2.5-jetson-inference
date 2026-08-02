@@ -47,12 +47,7 @@ class ModelArchive {
   uint64_t data_offset_{0};
   std::vector<TensorRecord> records_;
   std::unordered_map<std::string, size_t> index_;
-#ifdef _WIN32
-  void* file_handle_{nullptr};
-  void* mapping_handle_{nullptr};
-#else
   int fd_{-1};
-#endif
 };
 
 }  // namespace infer

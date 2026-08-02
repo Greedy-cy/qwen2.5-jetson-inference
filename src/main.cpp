@@ -5,9 +5,7 @@
 #include <iomanip>
 #include <nlohmann/json.hpp>
 
-#ifndef _WIN32
 #include <sys/resource.h>
-#endif
 
 namespace {
 
@@ -136,10 +134,8 @@ nlohmann::json summarize(const std::vector<double>& values) {
 }
 
 long peak_rss_kib() {
-#ifndef _WIN32
   rusage usage{};
   if (getrusage(RUSAGE_SELF, &usage) == 0) return usage.ru_maxrss;
-#endif
   return 0;
 }
 

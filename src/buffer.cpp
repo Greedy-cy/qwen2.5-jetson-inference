@@ -29,15 +29,9 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
 void Buffer::reset() {
   if (!data_) return;
   if (device_ == Device::kCpu) {
-#ifdef _WIN32
-    _aligned_free(data_);
-#else
     std::free(data_);
-#endif
   } else {
-#ifdef INFER_WITH_CUDA
     cudaFree(data_);
-#endif
   }
   data_ = nullptr;
   bytes_ = 0;
@@ -49,17 +43,9 @@ void Buffer::resize(size_t bytes, Device device) {
   bytes_ = bytes;
   if (bytes == 0) return;
   if (device == Device::kCpu) {
-#ifdef _WIN32
-    data_ = _aligned_malloc(bytes, 256);
-#else
     INFER_CHECK(posix_memalign(&data_, 256, bytes) == 0, "CPU allocation failed");
-#endif
   } else {
-#ifdef INFER_WITH_CUDA
     INFER_CUDA_CHECK(cudaMalloc(&data_, bytes));
-#else
-    throw Error("CUDA support is not compiled");
-#endif
   }
   INFER_CHECK(data_ != nullptr, "buffer allocation returned null");
 }

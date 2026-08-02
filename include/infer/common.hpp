@@ -21,9 +21,7 @@
 #include <utility>
 #include <vector>
 
-#ifdef INFER_WITH_CUDA
 #include <cuda_runtime_api.h>
-#endif
 
 namespace infer {
 
@@ -73,7 +71,6 @@ class Error : public std::runtime_error {
 #define INFER_CHECK(cond, message) \
   do { if (!(cond)) throw ::infer::Error(message); } while (false)
 
-#ifdef INFER_WITH_CUDA
 inline void cuda_check(cudaError_t status, const char* expression, const char* file, int line) {
   if (status != cudaSuccess) {
     std::ostringstream os;
@@ -83,7 +80,6 @@ inline void cuda_check(cudaError_t status, const char* expression, const char* f
   }
 }
 #define INFER_CUDA_CHECK(expr) ::infer::cuda_check((expr), #expr, __FILE__, __LINE__)
-#endif
 
 class WallTimer {
  public:

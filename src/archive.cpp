@@ -3,15 +3,10 @@
 #include <array>
 #include <nlohmann/json.hpp>
 
-#ifdef _WIN32
-#define NOMINMAX
-#include <windows.h>
-#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#endif
 
 namespace infer {
 namespace {
@@ -43,15 +38,8 @@ ModelArchive& ModelArchive::operator=(ModelArchive&& other) noexcept {
     data_offset_ = other.data_offset_;
     records_ = std::move(other.records_);
     index_ = std::move(other.index_);
-#ifdef _WIN32
-    file_handle_ = other.file_handle_;
-    mapping_handle_ = other.mapping_handle_;
-    other.file_handle_ = nullptr;
-    other.mapping_handle_ = nullptr;
-#else
     fd_ = other.fd_;
     other.fd_ = -1;
-#endif
     other.mapping_ = nullptr;
     other.mapped_bytes_ = 0;
   }
@@ -61,21 +49,6 @@ ModelArchive& ModelArchive::operator=(ModelArchive&& other) noexcept {
 void ModelArchive::open(const std::filesystem::path& path) {
   close();
   path_ = path;
-#ifdef _WIN32
-  const auto wide = path.wstring();
-  auto file = CreateFileW(wide.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  INFER_CHECK(file != INVALID_HANDLE_VALUE, "cannot open archive: " + path.string());
-  LARGE_INTEGER size{};
-  INFER_CHECK(GetFileSizeEx(file, &size), "cannot stat archive");
-  auto map = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
-  INFER_CHECK(map != nullptr, "cannot create archive mapping");
-  mapping_ = MapViewOfFile(map, FILE_MAP_READ, 0, 0, 0);
-  INFER_CHECK(mapping_ != nullptr, "cannot map archive");
-  file_handle_ = file;
-  mapping_handle_ = map;
-  mapped_bytes_ = static_cast<size_t>(size.QuadPart);
-#else
   fd_ = ::open(path.c_str(), O_RDONLY);
   INFER_CHECK(fd_ >= 0, "cannot open archive: " + path.string());
   struct stat st {};
@@ -83,10 +56,7 @@ void ModelArchive::open(const std::filesystem::path& path) {
   mapped_bytes_ = static_cast<size_t>(st.st_size);
   mapping_ = mmap(nullptr, mapped_bytes_, PROT_READ, MAP_PRIVATE, fd_, 0);
   INFER_CHECK(mapping_ != MAP_FAILED, "cannot mmap archive");
-#ifdef MADV_SEQUENTIAL
   madvise(mapping_, mapped_bytes_, MADV_SEQUENTIAL);
-#endif
-#endif
   INFER_CHECK(mapped_bytes_ >= sizeof(FileHeader), "archive is truncated");
   const auto* header = static_cast<const FileHeader*>(mapping_);
   INFER_CHECK(std::equal(kMagic.begin(), kMagic.end(), header->magic), "bad archive magic");
@@ -133,17 +103,9 @@ void ModelArchive::open(const std::filesystem::path& path) {
 
 void ModelArchive::close() {
   if (mapping_) {
-#ifdef _WIN32
-    UnmapViewOfFile(mapping_);
-    if (mapping_handle_) CloseHandle(mapping_handle_);
-    if (file_handle_) CloseHandle(file_handle_);
-    mapping_handle_ = nullptr;
-    file_handle_ = nullptr;
-#else
     munmap(mapping_, mapped_bytes_);
     if (fd_ >= 0) ::close(fd_);
     fd_ = -1;
-#endif
   }
   mapping_ = nullptr;
   mapped_bytes_ = 0;
