@@ -1,0 +1,77 @@
+{
+  "schema_version": "1.0",
+  "artifact_type": "audited_end_to_end_validation_summary",
+  "checkpoint": 16,
+  "name": "cuda_w8a16_end_to_end",
+  "status": "pass",
+  "implementation_commit": "304e6b5e1960fd9f919c8628c7b687af83be7c63",
+  "target": {
+    "device": "Jetson Orin Nano Super 8GB",
+    "cuda": "12.6"
+  },
+  "runtime": {
+    "precision": "w8a16",
+    "archive": "model.w8a16.qbin",
+    "prefill": "matrixized",
+    "decode": "single_token",
+    "quantized_prefill_linear": "gemm_w8a16",
+    "quantized_decode_linear": "gemv_w8a16",
+    "activation_dtype": "bfloat16",
+    "kv_cache_dtype": "bfloat16",
+    "logits_dtype": "bfloat16",
+    "accumulation_dtype": "float32",
+    "group_size": 64
+  },
+  "archives": {
+    "w16a16": {
+      "file_bytes": 989114112,
+      "payload_bytes": 988065536,
+      "sha256": "f8b6b16a3a85d70083bfd7f822a7d587332982b0f0e27691512efa844855b2a6"
+    },
+    "w8a16": {
+      "file_bytes": 642469632,
+      "payload_bytes": 641421056,
+      "sha256": "730d0ca9a60b55a63534c8edce19353d8f55fda07e6e5fc04ec88470bcf57814",
+      "int8_records": 168,
+      "bfloat16_records": 290
+    },
+    "payload_reduction_bytes": 346644480,
+    "payload_reduction_percent": 35.08314655
+  },
+  "real_model_correctness": {
+    "reference": "native_bfloat16_w16a16",
+    "prompts": [
+      {"label": "Hello", "w16_top1": 9707, "w8_top1": 9707, "cosine": 0.9995179640536648},
+      {"label": "What is CUDA?", "w16_top1": 80285, "w8_top1": 80285, "cosine": 0.9997985147945582},
+      {"label": "Explain matrix multiplication.", "w16_top1": 6689, "w8_top1": 6689, "cosine": 0.999788970298807},
+      {"label": "Write a C++ hello world program.", "w16_top1": 95456, "w8_top1": 95456, "cosine": 0.9995695089110035},
+      {"label": "What is the capital of France?", "w16_top1": 785, "w8_top1": 785, "cosine": 0.9997578804897234}
+    ],
+    "top1_matches": 5,
+    "top1_total": 5,
+    "minimum_cosine": 0.9995179640536648,
+    "mean_cosine": 0.9996865677095513,
+    "cosine_threshold": 0.9995,
+    "canonical_greedy_16_match": true,
+    "canonical_greedy_tokens": [80285, 12, 4086, 44, 320, 34253, 11434, 4903, 8, 374, 264, 943, 315, 3460, 4128, 1614]
+  },
+  "tests": {
+    "full_passed": 29,
+    "full_failed": 0,
+    "new_end_to_end_test": "Qwen2W8A16.PrefillAndDecodeReuseBf16Runtime"
+  },
+  "diagnostic_only_not_benchmark": {
+    "protocol": "single run, no controlled warmup/repeat or clock lock",
+    "w16a16": {"prompt_tokens": 32, "generated_tokens": 16, "ttft_ms": 178.15, "decode_tokens_per_second": 47.70},
+    "w8a16": {"prompt_tokens": 32, "generated_tokens": 16, "ttft_ms": 994.50, "decode_tokens_per_second": 30.72},
+    "formal_performance_deferred_to_checkpoint": 17
+  },
+  "regression_note": {
+    "cuda_w8a32_real_model_smoke": "pass",
+    "cuda_w16a16_real_model_smoke": "pass",
+    "cuda_w8a16_real_model_smoke": "pass",
+    "cuda_fp32_real_model_smoke": "not_completed_cuda_malloc_oom",
+    "cuda_fp32_available_memory_observed_gib": 6.4,
+    "automated_fp32_regression": "pass"
+  }
+}
