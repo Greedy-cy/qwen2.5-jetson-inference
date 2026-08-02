@@ -1,0 +1,110 @@
+{
+  "schema_version": "1.0",
+  "artifact_type": "audited_kernel_validation_summary",
+  "checkpoint": 15,
+  "name": "cuda_w8a16_gemv_gemm",
+  "status": "pass",
+  "implementation_commit": "4ea14822b450d4deb38f47275c5f7fc66ab7c231",
+  "target": {
+    "device": "Jetson Orin Nano Super 8GB",
+    "cuda": "12.6",
+    "compute_capability": "8.7"
+  },
+  "dtype_contract": {
+    "weight": "int8",
+    "scale": "bfloat16",
+    "input": "bfloat16",
+    "bias": "bfloat16_optional",
+    "accumulation": "float32",
+    "output": "bfloat16",
+    "group_size": 64,
+    "group_axis": 1
+  },
+  "kernel": {
+    "gemv_api": "gemv_w8a16",
+    "gemm_api": "gemm_w8a16",
+    "threads_per_block": 256,
+    "gemv_grid": "[out_features, 1]",
+    "gemm_grid": "[out_features, tokens]",
+    "vectorized_weight_load": "char4",
+    "vectorized_activation_load": "two __nv_bfloat162 values",
+    "scalar_fallback": [
+      "non_multiple_of_4_tail",
+      "unaligned_weight_row",
+      "unaligned_input_row",
+      "chunk_crosses_group_boundary"
+    ]
+  },
+  "reference": {
+    "method": "explicit INT8 dequantization using stored BF16 scales and BF16 inputs, FP32 FMA, BF16 output rounding",
+    "gemv_equals_first_gemm_token": true
+  },
+  "cases": [
+    {
+      "tokens": 3,
+      "out_features": 5,
+      "in_features": 70,
+      "bias": true,
+      "coverage": ["group_boundary", "tail", "unaligned_row", "zero_group"],
+      "max_abs_error": 0.0
+    },
+    {
+      "tokens": 2,
+      "out_features": 7,
+      "in_features": 65,
+      "bias": false,
+      "coverage": ["one_element_final_group", "no_bias"],
+      "max_abs_error": 0.0
+    },
+    {
+      "tokens": 2,
+      "out_features": 896,
+      "in_features": 896,
+      "bias": true,
+      "coverage": ["q_projection_shape", "vectorized_path"],
+      "max_abs_error": 0.0
+    },
+    {
+      "tokens": 2,
+      "out_features": 128,
+      "in_features": 896,
+      "bias": true,
+      "coverage": ["k_v_projection_shape", "vectorized_path"],
+      "max_abs_error": 0.0
+    },
+    {
+      "tokens": 2,
+      "out_features": 4864,
+      "in_features": 896,
+      "bias": false,
+      "coverage": ["gate_up_projection_shape", "vectorized_path"],
+      "max_abs_error": 0.0
+    },
+    {
+      "tokens": 2,
+      "out_features": 896,
+      "in_features": 4864,
+      "bias": false,
+      "coverage": ["down_projection_shape", "vectorized_path"],
+      "max_abs_error": 0.0
+    }
+  ],
+  "additional_coverage": {
+    "int8_extremes_negative_127_positive_127": true,
+    "zero_group": true,
+    "group_size_32_rejected": true,
+    "bias_and_no_bias": true
+  },
+  "tests": {
+    "full_passed": 28,
+    "full_failed": 0,
+    "specialized_passed": 2,
+    "specialized_runtime_seconds": 0.154
+  },
+  "sanitizer": {
+    "compute_sanitizer_available": false,
+    "cuda_memcheck_available": false
+  },
+  "end_to_end_inference": null,
+  "performance_measurement": null
+}
