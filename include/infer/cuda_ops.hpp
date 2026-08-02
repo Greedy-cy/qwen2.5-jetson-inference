@@ -93,6 +93,16 @@ void gemm_bf16_cublas(cublasHandle_t handle, const __nv_bfloat16* weight,
                        int tokens, int out_features, int in_features,
                        cudaStream_t stream);
 
+void gemv_w8a16(const int8_t* weight, const __nv_bfloat16* scales,
+                 int group_size, const __nv_bfloat16* bias,
+                 const __nv_bfloat16* input, __nv_bfloat16* output,
+                 int out_features, int in_features, cudaStream_t stream);
+void gemm_w8a16(const int8_t* weight, const __nv_bfloat16* scales,
+                 int group_size, const __nv_bfloat16* bias,
+                 const __nv_bfloat16* input, __nv_bfloat16* output,
+                 int tokens, int out_features, int in_features,
+                 cudaStream_t stream);
+
 void embedding_bf16(const __nv_bfloat16* table, int token,
                     __nv_bfloat16* output, int hidden_size,
                     cudaStream_t stream);

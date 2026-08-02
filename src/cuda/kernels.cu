@@ -825,6 +825,71 @@ __global__ void gemm_bf16_tiled_kernel(
   }
 }
 
+__global__ void linear_w8a16_kernel(
+    const int8_t* weight, const BFloat16* scales, int group_size,
+    const BFloat16* bias, const BFloat16* input, BFloat16* output,
+    int tokens, int out_features, int in_features) {
+  const int row = blockIdx.x;
+  const int token = blockIdx.y;
+  if (row >= out_features || token >= tokens) return;
+
+  __shared__ float reduction[256];
+  const int groups = (in_features + group_size - 1) / group_size;
+  const int8_t* row_weight =
+      weight + static_cast<size_t>(row) * in_features;
+  const BFloat16* token_input =
+      input + static_cast<size_t>(token) * in_features;
+  const BFloat16* row_scales =
+      scales + static_cast<size_t>(row) * groups;
+  const bool vector_aligned =
+      (reinterpret_cast<uintptr_t>(row_weight) & 3U) == 0U &&
+      (reinterpret_cast<uintptr_t>(token_input) & 3U) == 0U;
+
+  float sum = 0.0f;
+  for (int column = threadIdx.x * 4; column < in_features;
+       column += blockDim.x * 4) {
+    const int remaining = min(4, in_features - column);
+    const int group = column / group_size;
+    const bool one_group =
+        (column + remaining - 1) / group_size == group;
+    if (remaining == 4 && vector_aligned && one_group) {
+      const char4 packed =
+          *reinterpret_cast<const char4*>(row_weight + column);
+      const auto* input_pairs =
+          reinterpret_cast<const BFloat16Pair*>(token_input + column);
+      const float2 first = __bfloat1622float2(input_pairs[0]);
+      const float2 second = __bfloat1622float2(input_pairs[1]);
+      const float scale = __bfloat162float(row_scales[group]);
+      sum = fmaf(static_cast<float>(packed.x) * scale, first.x, sum);
+      sum = fmaf(static_cast<float>(packed.y) * scale, first.y, sum);
+      sum = fmaf(static_cast<float>(packed.z) * scale, second.x, sum);
+      sum = fmaf(static_cast<float>(packed.w) * scale, second.y, sum);
+    } else {
+      for (int offset = 0; offset < remaining; ++offset) {
+        const int current = column + offset;
+        const float scale =
+            __bfloat162float(row_scales[current / group_size]);
+        sum = fmaf(static_cast<float>(row_weight[current]) * scale,
+                   __bfloat162float(token_input[current]), sum);
+      }
+    }
+  }
+
+  reduction[threadIdx.x] = sum;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      reduction[threadIdx.x] += reduction[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    const float bias_value = bias ? __bfloat162float(bias[row]) : 0.0f;
+    output[static_cast<size_t>(token) * out_features + row] =
+        __float2bfloat16_rn(reduction[0] + bias_value);
+  }
+}
+
 __global__ void add_bias_batch_bf16_kernel(
     BFloat16* output, const BFloat16* bias, int tokens, int out_features) {
   const int total = tokens * out_features;
@@ -1184,6 +1249,28 @@ void gemm_bf16(const BFloat16* weight, const BFloat16* bias,
                   (tokens + tile - 1) / tile);
   gemm_bf16_tiled_kernel<<<grid, block, 0, stream>>>(
       weight, bias, input, output, tokens, out_features, in_features);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void gemv_w8a16(const int8_t* weight, const BFloat16* scales,
+                 int group_size, const BFloat16* bias,
+                 const BFloat16* input, BFloat16* output, int out_features,
+                 int in_features, cudaStream_t stream) {
+  INFER_CHECK(group_size == 64, "w8a16 group size must be 64");
+  linear_w8a16_kernel<<<dim3(out_features, 1), 256, 0, stream>>>(
+      weight, scales, group_size, bias, input, output, 1, out_features,
+      in_features);
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void gemm_w8a16(const int8_t* weight, const BFloat16* scales,
+                 int group_size, const BFloat16* bias,
+                 const BFloat16* input, BFloat16* output, int tokens,
+                 int out_features, int in_features, cudaStream_t stream) {
+  INFER_CHECK(group_size == 64, "w8a16 group size must be 64");
+  linear_w8a16_kernel<<<dim3(out_features, tokens), 256, 0, stream>>>(
+      weight, scales, group_size, bias, input, output, tokens, out_features,
+      in_features);
   INFER_CUDA_CHECK(cudaGetLastError());
 }
 

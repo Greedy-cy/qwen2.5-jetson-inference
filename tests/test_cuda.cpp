@@ -629,6 +629,123 @@ std::vector<float> linear_reference(const std::vector<float>& weight,
   return output;
 }
 
+std::vector<float> w8a16_reference(
+    const std::vector<int8_t>& weight, const std::vector<float>& scales,
+    int group_size, const std::vector<float>* bias,
+    const std::vector<float>& input, int tokens, int out_features,
+    int in_features) {
+  const int groups = (in_features + group_size - 1) / group_size;
+  std::vector<float> output(static_cast<size_t>(tokens) * out_features);
+  for (int token = 0; token < tokens; ++token) {
+    for (int row = 0; row < out_features; ++row) {
+      float sum = 0.0f;
+      for (int column = 0; column < in_features; ++column) {
+        const float dequantized =
+            static_cast<float>(
+                weight[static_cast<size_t>(row) * in_features + column]) *
+            scales[static_cast<size_t>(row) * groups + column / group_size];
+        sum = fmaf(dequantized,
+                   input[static_cast<size_t>(token) * in_features + column],
+                   sum);
+      }
+      if (bias) sum += (*bias)[row];
+      output[static_cast<size_t>(token) * out_features + row] =
+          bf16_round(sum);
+    }
+  }
+  return output;
+}
+
+void check_w8a16_linear_case(infer::cuda::Context& context, int tokens,
+                             int out_features, int in_features,
+                             bool with_bias) {
+  constexpr int group_size = 64;
+  const int groups = (in_features + group_size - 1) / group_size;
+  std::vector<int8_t> weight(static_cast<size_t>(out_features) * in_features);
+  std::vector<float> scales(static_cast<size_t>(out_features) * groups);
+  std::vector<float> input(static_cast<size_t>(tokens) * in_features);
+  std::vector<float> bias(out_features);
+  for (size_t index = 0; index < weight.size(); ++index) {
+    weight[index] =
+        static_cast<int8_t>((static_cast<int>(index * 17U % 31U)) - 15);
+  }
+  if (weight.size() >= 2) {
+    weight[0] = -127;
+    weight[1] = 127;
+  }
+  for (size_t index = 0; index < scales.size(); ++index) {
+    scales[index] = (1 + static_cast<int>(index % 7)) / 1024.0f;
+  }
+  for (size_t index = 0; index < input.size(); ++index) {
+    input[index] =
+        (static_cast<int>(index * 13U % 29U) - 14) / 64.0f;
+  }
+  for (int row = 0; row < out_features; ++row) {
+    bias[row] = (row % 9 - 4) / 32.0f;
+  }
+  if (in_features > group_size) {
+    const int row = out_features - 1;
+    std::fill_n(weight.begin() + static_cast<size_t>(row) * in_features,
+                group_size, static_cast<int8_t>(0));
+    scales[static_cast<size_t>(row) * groups] = 1.0f;
+  }
+
+  const auto rounded_scales = decode_bf16(encode_bf16(scales));
+  const auto rounded_input = decode_bf16(encode_bf16(input));
+  const auto rounded_bias = decode_bf16(encode_bf16(bias));
+  const auto expected = w8a16_reference(
+      weight, rounded_scales, group_size,
+      with_bias ? &rounded_bias : nullptr, rounded_input, tokens,
+      out_features, in_features);
+
+  infer::Buffer d_weight(weight.size() * sizeof(int8_t),
+                         infer::Device::kCuda);
+  infer::Buffer d_scales(scales.size() * sizeof(uint16_t),
+                         infer::Device::kCuda);
+  infer::Buffer d_input(input.size() * sizeof(uint16_t),
+                        infer::Device::kCuda);
+  infer::Buffer d_bias(bias.size() * sizeof(uint16_t), infer::Device::kCuda);
+  infer::Buffer d_gemv(static_cast<size_t>(out_features) * sizeof(uint16_t),
+                       infer::Device::kCuda);
+  infer::Buffer d_gemm(static_cast<size_t>(tokens) * out_features *
+                           sizeof(uint16_t),
+                       infer::Device::kCuda);
+  ASSERT_EQ(cudaMemcpyAsync(d_weight.data(), weight.data(), d_weight.bytes(),
+                            cudaMemcpyHostToDevice, context.stream()),
+            cudaSuccess);
+  upload_bf16(d_scales, scales, context);
+  upload_bf16(d_input, input, context);
+  upload_bf16(d_bias, bias, context);
+  const auto* bias_pointer = with_bias ? bf16_data(d_bias) : nullptr;
+
+  infer::cuda::gemv_w8a16(
+      static_cast<const int8_t*>(d_weight.data()), bf16_data(d_scales),
+      group_size, bias_pointer, bf16_data(d_input), bf16_data(d_gemv),
+      out_features, in_features, context.stream());
+  infer::cuda::gemm_w8a16(
+      static_cast<const int8_t*>(d_weight.data()), bf16_data(d_scales),
+      group_size, bias_pointer, bf16_data(d_input), bf16_data(d_gemm), tokens,
+      out_features, in_features, context.stream());
+  const auto gemv = read_bf16(d_gemv, out_features, context);
+  const auto gemm = read_bf16(
+      d_gemm, static_cast<size_t>(tokens) * out_features, context);
+  float max_abs_error = 0.0f;
+  for (size_t index = 0; index < gemm.size(); ++index) {
+    max_abs_error =
+        std::max(max_abs_error, std::abs(gemm[index] - expected[index]));
+    const float tolerance =
+        std::max(0.015625f, std::abs(expected[index]) * 0.01f);
+    EXPECT_NEAR(gemm[index], expected[index], tolerance) << "index " << index;
+  }
+  std::cout << "W8A16_LINEAR tokens=" << tokens
+            << " out_features=" << out_features
+            << " in_features=" << in_features
+            << " max_abs_error=" << max_abs_error << '\n';
+  for (int row = 0; row < out_features; ++row) {
+    EXPECT_EQ(gemv[row], gemm[row]) << "row " << row;
+  }
+}
+
 void expect_linear_near(const std::vector<float>& actual,
                         const std::vector<float>& expected) {
   ASSERT_EQ(actual.size(), expected.size());
@@ -718,4 +835,24 @@ TEST(CudaBFloat16, LinearCustomAndCublasMatchFp32Reference) {
   check_bf16_linear_case(context, 3, 11, 14, true);
   check_bf16_linear_case(context, 2, 5, 7, true);
   check_bf16_linear_case(context, 3, 23, 14, false);
+}
+
+TEST(CudaW8A16, GemvAndGemmHandleGroupBoundaryTailAndBias) {
+  if (!cuda_available()) GTEST_SKIP();
+  infer::cuda::Context context;
+  check_w8a16_linear_case(context, 3, 5, 70, true);
+  check_w8a16_linear_case(context, 2, 7, 65, false);
+  EXPECT_THROW(
+      infer::cuda::gemv_w8a16(nullptr, nullptr, 32, nullptr, nullptr, nullptr,
+                              1, 1, context.stream()),
+      infer::Error);
+}
+
+TEST(CudaW8A16, GemvAndGemmMatchDequantizedReferenceAtQwenShapes) {
+  if (!cuda_available()) GTEST_SKIP();
+  infer::cuda::Context context;
+  check_w8a16_linear_case(context, 2, 896, 896, true);
+  check_w8a16_linear_case(context, 2, 128, 896, true);
+  check_w8a16_linear_case(context, 2, 4864, 896, false);
+  check_w8a16_linear_case(context, 2, 896, 4864, false);
 }
