@@ -820,6 +820,9 @@ TEST(CudaBFloat16, LinearCustomAndCublasMatchFp32Reference) {
   check_bf16_linear_case(context, 3, 11, 14, true);
   check_bf16_linear_case(context, 2, 5, 7, true);
   check_bf16_linear_case(context, 3, 23, 14, false);
+  check_bf16_linear_case(context, 32, 64, 64, true);
+  check_bf16_linear_case(context, 31, 37, 33, true);
+  check_bf16_linear_case(context, 65, 70, 67, false);
 }
 
 TEST(CudaW8A16, GemvAndGemmHandleGroupBoundaryTailAndBias) {
