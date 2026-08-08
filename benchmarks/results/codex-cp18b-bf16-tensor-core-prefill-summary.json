@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "report_id": "CODEX-CP18B",
+  "title": "BF16 Tensor Core Prefill GEMM optimization",
+  "status": "implemented_and_measured_performance_gate_partially_failed",
+  "measurement_commit": "c9cca8814eb0deb0d413e445242c6091ee34b4e1",
+  "tensor_core_commit": "a689b9f264539ae62d4224e285862717864339da",
+  "git_dirty": false,
+  "model": "Qwen2.5-0.5B-Instruct",
+  "model_archive_sha256": "f8b6b16a3a85d70083bfd7f822a7d587332982b0f0e27691512efa844855b2a6",
+  "device": "Jetson Orin Nano Super 8GB",
+  "cuda": "12.6",
+  "compute_capability": "8.7",
+  "power_mode": "MAXN_SUPER",
+  "precision": {
+    "cli_name": "w16a16",
+    "storage": "bf16",
+    "accumulation": "fp32"
+  },
+  "protocol": {
+    "canonical": {
+      "prompt_tokens": 32,
+      "output_tokens": 128,
+      "max_sequence_length": 256,
+      "warmup": 5,
+      "repeat": 20
+    },
+    "microbenchmark": {
+      "warmup": 20,
+      "repeat": 100,
+      "timing": "CUDA Event",
+      "aggregate": "sum of p50 for Q/K/V/O/gate/up/down"
+    },
+    "clocks": "jetson_clocks with trap restore"
+  },
+  "implementation": {
+    "short_prompt_tile": "M32N64K64",
+    "long_prompt_tile": "M128N128K32",
+    "tensor_core": "WMMA BF16",
+    "global_to_shared": "16-byte cp.async",
+    "pipeline": "double buffered",
+    "bias": "fused",
+    "tail_fallback": "generic WMMA"
+  },
+  "microbenchmark": [
+    {
+      "tokens": 32,
+      "cp18a_custom_p50_sum_ms": 20.151584,
+      "cp18b_custom_p50_sum_ms": 0.5007680021226406,
+      "cublas_p50_sum_ms": 0.4367680009454489,
+      "speedup_vs_cp18a": 40.2414,
+      "cublas_attainment_percent": 87.2196
+    },
+    {
+      "tokens": 128,
+      "cp18a_custom_p50_sum_ms": 79.68832,
+      "cp18b_custom_p50_sum_ms": 1.0230080038309097,
+      "cublas_p50_sum_ms": 0.5888960063457489,
+      "speedup_vs_cp18a": 77.8961,
+      "cublas_attainment_percent": 57.5651
+    },
+    {
+      "tokens": 512,
+      "cp18a_custom_p50_sum_ms": 317.866875,
+      "cp18b_custom_p50_sum_ms": 3.259072035551071,
+      "cublas_p50_sum_ms": 1.9113919883966446,
+      "speedup_vs_cp18a": 97.5329,
+      "cublas_attainment_percent": 58.6484
+    }
+  ],
+  "correctness": {
+    "ctest_passed": 28,
+    "ctest_total": 28,
+    "max_custom_vs_cublas_relative_to_peak": 0.006578947368421052,
+    "numerical_regression": false
+  },
+  "canonical": {
+    "custom": {
+      "ttft_mean_ms": 26.24579095,
+      "prefill_tokens_per_second_mean": 1219.243393031629,
+      "decode_tokens_per_second_mean": 27.750999822180866,
+      "decode_cv_percent": 0.011348043509226193,
+      "total_latency_mean_ms": 4602.6580793,
+      "power_mean_w": 13.698882701421802,
+      "energy_per_generated_token_j": 0.4921623658161757
+    },
+    "cublas": {
+      "ttft_mean_ms": 16.83976255,
+      "prefill_tokens_per_second_mean": 1900.2648530344327,
+      "decode_tokens_per_second_mean": 67.5397289896679,
+      "decode_cv_percent": 0.008302955215739953,
+      "total_latency_mean_ms": 1897.2150209,
+      "power_mean_w": 18.108031700288183,
+      "energy_per_generated_token_j": 0.2675780578121395
+    },
+    "custom_prefill_attainment_percent": 64.1618,
+    "custom_prefill_speedup_vs_cp18a": 18.9421,
+    "custom_total_latency_speedup_vs_cp18a": 1.1020
+  },
+  "prompt_sweep": [
+    {
+      "tokens": 1,
+      "custom_prefill_tokens_per_second": 12.981658069122403,
+      "cublas_prefill_tokens_per_second": 69.75298137980755,
+      "attainment_percent": 18.611
+    },
+    {
+      "tokens": 32,
+      "custom_prefill_tokens_per_second": 1218.455974109506,
+      "cublas_prefill_tokens_per_second": 1903.8784579079997,
+      "attainment_percent": 63.999
+    },
+    {
+      "tokens": 128,
+      "custom_prefill_tokens_per_second": 1992.6790005871796,
+      "cublas_prefill_tokens_per_second": 2778.8519718984344,
+      "attainment_percent": 71.709
+    },
+    {
+      "tokens": 512,
+      "custom_prefill_tokens_per_second": 1033.9354396452254,
+      "cublas_prefill_tokens_per_second": 1123.920139885573,
+      "attainment_percent": 91.994
+    }
+  ],
+  "profile": {
+    "custom_gpu_kernel_time_percent": {
+      "gemv_bf16": 93.1,
+      "gemm_bf16_wmma_async": 2.1
+    },
+    "custom_nvtx_prefill_median_ms": 27.138768,
+    "custom_nvtx_decode_token_median_ms": 37.64928,
+    "cublas_nvtx_prefill_median_ms": 17.203056,
+    "cublas_nvtx_decode_token_median_ms": 15.040464,
+    "ncu_long_prompt": {
+      "memory_throughput_percent": 63.51,
+      "compute_sm_throughput_percent": 47.38,
+      "achieved_occupancy_percent": 61.53,
+      "excessive_shared_wavefront_percent": 32.0
+    }
+  },
+  "acceptance": {
+    "correctness": "pass",
+    "tokens_32_target_70_percent": "pass",
+    "tokens_32_stretch_80_percent": "pass",
+    "tokens_128_target_70_percent": "fail",
+    "tokens_512_target_70_percent": "fail",
+    "decode_cv_below_3_percent": "pass"
+  },
+  "recommended_next_checkpoint": "Optimize BF16 Decode GEMV and tied LM Head; keep long-prompt shared-memory swizzle as a separate decision."
+}
