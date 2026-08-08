@@ -952,6 +952,117 @@ __global__ void gemm_bf16_wmma_async_kernel(
   }
 }
 
+__global__ void gemm_bf16_wmma_async_m128n128_kernel(
+    const BFloat16* weight, const BFloat16* bias, const BFloat16* input,
+    BFloat16* output, int tokens, int out_features, int in_features) {
+  namespace wmma = nvcuda::wmma;
+  constexpr int kWmmaM = 16;
+  constexpr int kWmmaN = 16;
+  constexpr int kWmmaK = 16;
+  constexpr int kBlockM = 128;
+  constexpr int kBlockN = 128;
+  constexpr int kBlockK = 32;
+  constexpr int kSharedK = kBlockK + 8;
+  constexpr int kWarpColumns = kBlockN / kWmmaN;
+  constexpr int kAccumulatorCount = 4;
+
+  struct OperandStorage {
+    BFloat16 input[kBlockM * kSharedK];
+    BFloat16 weight[kBlockN * kSharedK];
+  };
+  union SharedStorage {
+    OperandStorage operands[2];
+    float warp_output[16][kWmmaM * kWmmaN];
+  };
+  __shared__ __align__(32) SharedStorage shared;
+
+  const int warp = threadIdx.x / warpSize;
+  const int warp_row_group = warp / kWarpColumns;
+  const int warp_column = warp % kWarpColumns;
+  const int block_token = blockIdx.y * kBlockM;
+  const int block_row = blockIdx.x * kBlockN;
+  const int stage_count = in_features / kBlockK;
+
+  wmma::fragment<wmma::accumulator, kWmmaM, kWmmaN, kWmmaK, float>
+      accumulators[kAccumulatorCount];
+#pragma unroll
+  for (int index = 0; index < kAccumulatorCount; ++index) {
+    wmma::fill_fragment(accumulators[index], 0.0f);
+  }
+
+  load_bf16_wmma_stage_async<kBlockM, kBlockN, kBlockK, kSharedK>(
+      weight, input, shared.operands[0].input, shared.operands[0].weight,
+      block_token, block_row, 0, in_features);
+  __pipeline_commit();
+  __pipeline_wait_prior(0);
+  __syncthreads();
+
+  int current_buffer = 0;
+  for (int stage = 0; stage < stage_count; ++stage) {
+    const int next_stage = stage + 1;
+    if (next_stage < stage_count) {
+      const int next_buffer = current_buffer ^ 1;
+      load_bf16_wmma_stage_async<kBlockM, kBlockN, kBlockK, kSharedK>(
+          weight, input, shared.operands[next_buffer].input,
+          shared.operands[next_buffer].weight, block_token, block_row,
+          next_stage * kBlockK, in_features);
+      __pipeline_commit();
+    }
+
+    const BFloat16* input_tile = shared.operands[current_buffer].input;
+    const BFloat16* weight_tile = shared.operands[current_buffer].weight;
+#pragma unroll
+    for (int column = 0; column < kBlockK; column += kWmmaK) {
+      wmma::fragment<wmma::matrix_b, kWmmaM, kWmmaN, kWmmaK, BFloat16,
+                     wmma::col_major>
+          weight_fragment;
+      wmma::load_matrix_sync(
+          weight_fragment,
+          weight_tile + warp_column * kWmmaN * kSharedK + column, kSharedK);
+#pragma unroll
+      for (int index = 0; index < kAccumulatorCount; ++index) {
+        const int tile_row = warp_row_group + index * 2;
+        wmma::fragment<wmma::matrix_a, kWmmaM, kWmmaN, kWmmaK, BFloat16,
+                       wmma::row_major>
+            input_fragment;
+        wmma::load_matrix_sync(
+            input_fragment,
+            input_tile + tile_row * kWmmaM * kSharedK + column, kSharedK);
+        wmma::mma_sync(accumulators[index], input_fragment, weight_fragment,
+                       accumulators[index]);
+      }
+    }
+
+    if (next_stage < stage_count) {
+      __pipeline_wait_prior(0);
+      __syncthreads();
+      current_buffer ^= 1;
+    }
+  }
+  __syncthreads();
+
+  float* warp_output = shared.warp_output[warp];
+#pragma unroll
+  for (int index = 0; index < kAccumulatorCount; ++index) {
+    const int tile_row = warp_row_group + index * 2;
+    wmma::store_matrix_sync(warp_output, accumulators[index], kWmmaN,
+                            wmma::mem_row_major);
+    __syncwarp();
+    for (int element = threadIdx.x % warpSize;
+         element < kWmmaM * kWmmaN; element += warpSize) {
+      const int local_token = tile_row * kWmmaM + element / kWmmaN;
+      const int local_output_row =
+          warp_column * kWmmaN + element % kWmmaN;
+      const int token = block_token + local_token;
+      const int row = block_row + local_output_row;
+      const float bias_value = bias ? __bfloat162float(bias[row]) : 0.0f;
+      output[static_cast<size_t>(token) * out_features + row] =
+          __float2bfloat16_rn(warp_output[element] + bias_value);
+    }
+    __syncwarp();
+  }
+}
+
 __global__ void linear_w8a16_kernel(
     const int8_t* weight, const BFloat16* scales, int group_size,
     const BFloat16* bias, const BFloat16* input, BFloat16* output,
@@ -1356,16 +1467,23 @@ void gemm_bf16(const BFloat16* weight, const BFloat16* bias,
                 const BFloat16* input, BFloat16* output, int tokens,
                 int out_features, int in_features, cudaStream_t stream) {
   constexpr int block_n = 64;
-  constexpr int block_m = 32;
   constexpr int threads = 256;
-  const dim3 grid((out_features + block_n - 1) / block_n,
-                  (tokens + block_m - 1) / block_m);
-  const bool aligned = tokens % block_m == 0 && out_features % block_n == 0 &&
-                       in_features % 64 == 0;
-  if (aligned) {
+  const bool aligned = out_features % block_n == 0 && in_features % 64 == 0;
+  if (aligned && tokens % 128 == 0 && out_features % 128 == 0) {
+    constexpr int block_m = 128;
+    constexpr int large_block_n = 128;
+    const dim3 grid(out_features / large_block_n, tokens / block_m);
+    gemm_bf16_wmma_async_m128n128_kernel<<<grid, 512, 0, stream>>>(
+        weight, bias, input, output, tokens, out_features, in_features);
+  } else if (aligned && tokens % 32 == 0) {
+    constexpr int block_m = 32;
+    const dim3 grid(out_features / block_n, tokens / block_m);
     gemm_bf16_wmma_async_kernel<<<grid, threads, 0, stream>>>(
         weight, bias, input, output, tokens, out_features, in_features);
   } else {
+    constexpr int block_m = 32;
+    const dim3 grid((out_features + block_n - 1) / block_n,
+                    (tokens + block_m - 1) / block_m);
     gemm_bf16_wmma_kernel<block_m><<<grid, threads, 0, stream>>>(
         weight, bias, input, output, tokens, out_features, in_features);
   }
