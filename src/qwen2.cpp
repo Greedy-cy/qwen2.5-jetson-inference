@@ -80,13 +80,14 @@ void Qwen2Model::initialize_workspace() {
   const size_t element_count =
       static_cast<size_t>(hidden) * 5 + static_cast<size_t>(kv) * 2 +
       static_cast<size_t>(intermediate) * 3 + vocab +
-      options_.max_sequence_length;
+      options_.max_sequence_length + 8 * 20;
   workspace_.resize(align_up(element_count * element_size), options_.backend);
 
   if (use_bf16) {
     auto* base = static_cast<__nv_bfloat16*>(workspace_.data());
     size_t cursor = 0;
     auto take = [&](int count) {
+      cursor = (cursor + 7) & ~static_cast<size_t>(7);
       __nv_bfloat16* result = base + cursor;
       cursor += static_cast<size_t>(count);
       return result;
@@ -128,13 +129,14 @@ void Qwen2Model::initialize_workspace() {
       static_cast<size_t>(hidden) * 5 + static_cast<size_t>(kv) * 2 +
       static_cast<size_t>(intermediate) * 3;
   const size_t prefill_element_count =
-      static_cast<size_t>(options_.max_sequence_length) * row_width;
+      static_cast<size_t>(options_.max_sequence_length) * row_width + 8 * 20;
   prefill_workspace_.resize(
       align_up(prefill_element_count * element_size), options_.backend);
   if (use_bf16) {
     auto* base = static_cast<__nv_bfloat16*>(prefill_workspace_.data());
     size_t cursor = 0;
     auto take = [&](int width) {
+      cursor = (cursor + 7) & ~static_cast<size_t>(7);
       __nv_bfloat16* result = base + cursor;
       cursor += static_cast<size_t>(options_.max_sequence_length) * width;
       return result;
@@ -179,6 +181,12 @@ void Qwen2Model::initialize_workspace() {
       2 * config_.num_layers * per_layer * element_size, options_.backend);
   if (options_.backend == Device::kCuda) {
     argmax_buffer_.resize(sizeof(int), Device::kCuda);
+    const size_t lm_head_blocks =
+        (static_cast<size_t>(config_.vocab_size) + 7) / 8;
+    lm_head_workspace_.resize(
+        lm_head_blocks * (sizeof(float) + sizeof(int)), Device::kCuda);
+    lm_head_max_value_ = static_cast<float*>(lm_head_workspace_.data());
+    lm_head_max_index_ = reinterpret_cast<int*>(lm_head_max_value_ + lm_head_blocks);
   }
 }
 const void* Qwen2Model::weight(std::string_view name) const {
@@ -239,6 +247,31 @@ void Qwen2Model::linear_cuda_bf16(
     cuda::gemv_bf16(
         bf16_weight(weight_name), bias, input, output, out_features,
         in_features, cuda_context_->stream());
+  }
+}
+
+void Qwen2Model::lm_head_cuda_bf16(std::string_view weight_name,
+                                   const __nv_bfloat16* input,
+                                   __nv_bfloat16* logits, int out_features,
+                                   int in_features) {
+  INFER_CHECK(options_.backend == Device::kCuda &&
+                  (options_.precision == Precision::kW16A16 ||
+                   options_.precision == Precision::kW8A16),
+              "BF16 LM head requires CUDA W16A16 or W8A16");
+  INFER_CHECK(archive_.record(weight_name).dtype == DType::kBFloat16,
+              "BF16 tied LM head requires bfloat16 weights");
+  if (options_.linear_kernel == LinearKernel::kCublas) {
+    cuda::gemv_bf16_cublas(
+        cuda_context_->cublas(), bf16_weight(weight_name), nullptr, input,
+        logits, out_features, in_features, cuda_context_->stream());
+    cuda::argmax_bf16(logits, out_features,
+                      static_cast<int*>(argmax_buffer_.data()),
+                      cuda_context_->stream());
+  } else {
+    cuda::lm_head_bf16(
+        bf16_weight(weight_name), nullptr, input, logits, lm_head_max_value_,
+        lm_head_max_index_, static_cast<int*>(argmax_buffer_.data()),
+        out_features, in_features, cuda_context_->stream());
   }
 }
 
@@ -569,11 +602,8 @@ int Qwen2Model::prefill_cuda_bf16(
   const std::string lm_head = archive_.contains("lm_head.weight")
                                   ? "lm_head.weight"
                                   : "model.embed_tokens.weight";
-  linear_cuda_bf16(
-      lm_head, {}, bf16_norm_, bf16_logits_, config_.vocab_size, hidden);
-  cuda::argmax_bf16(
-      bf16_logits_, config_.vocab_size,
-      static_cast<int*>(argmax_buffer_.data()), stream);
+  lm_head_cuda_bf16(lm_head, bf16_norm_, bf16_logits_, config_.vocab_size,
+                    hidden);
   int result = 0;
   INFER_CUDA_CHECK(cudaMemcpyAsync(
       &result, argmax_buffer_.data(), sizeof(int), cudaMemcpyDeviceToHost,
@@ -739,11 +769,8 @@ int Qwen2Model::decode_token_cuda_bf16(int token, int position) {
   const std::string lm_head = archive_.contains("lm_head.weight")
                                   ? "lm_head.weight"
                                   : "model.embed_tokens.weight";
-  linear_cuda_bf16(
-      lm_head, {}, bf16_norm_, bf16_logits_, config_.vocab_size, hidden);
-  cuda::argmax_bf16(
-      bf16_logits_, config_.vocab_size,
-      static_cast<int*>(argmax_buffer_.data()), stream);
+  lm_head_cuda_bf16(lm_head, bf16_norm_, bf16_logits_, config_.vocab_size,
+                    hidden);
   int result = 0;
   INFER_CUDA_CHECK(cudaMemcpyAsync(
       &result, argmax_buffer_.data(), sizeof(int), cudaMemcpyDeviceToHost,

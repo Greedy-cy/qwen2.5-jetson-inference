@@ -825,6 +825,183 @@ TEST(CudaBFloat16, LinearCustomAndCublasMatchFp32Reference) {
   check_bf16_linear_case(context, 65, 70, 67, false);
 }
 
+namespace {
+
+std::vector<uint16_t> make_gemv_weight(int out_features, int in_features,
+                                       int seed) {
+  std::vector<uint16_t> result(
+      static_cast<size_t>(out_features) * in_features);
+  for (size_t index = 0; index < result.size(); ++index) {
+    result[index] = float_to_bf16(
+        (static_cast<int>((index + seed) % 19) - 9) * 0.0078125f);
+  }
+  return result;
+}
+
+void check_bf16_gemv_qwen_case(infer::cuda::Context& context, int out_features,
+                               int in_features, bool with_bias) {
+  const auto weight = make_gemv_weight(out_features, in_features, 5);
+  const auto input = encode_bf16([&]() {
+    std::vector<float> values(in_features);
+    for (int column = 0; column < in_features; ++column) {
+      values[column] = (column % 11 - 5) * 0.015625f;
+    }
+    return values;
+  }());
+  std::vector<uint16_t> bias(out_features);
+  for (int row = 0; row < out_features; ++row) {
+    bias[row] = float_to_bf16((row % 7 - 3) * 0.03125f);
+  }
+  infer::Buffer d_weight(weight.size() * sizeof(uint16_t),
+                         infer::Device::kCuda);
+  infer::Buffer d_input(input.size() * sizeof(uint16_t),
+                        infer::Device::kCuda);
+  infer::Buffer d_bias(bias.size() * sizeof(uint16_t), infer::Device::kCuda);
+  infer::Buffer d_custom(static_cast<size_t>(out_features) * sizeof(uint16_t),
+                         infer::Device::kCuda);
+  infer::Buffer d_cublas(static_cast<size_t>(out_features) * sizeof(uint16_t),
+                         infer::Device::kCuda);
+  upload_bf16(d_weight, decode_bf16(weight), context);
+  upload_bf16(d_input, decode_bf16(input), context);
+  upload_bf16(d_bias, decode_bf16(bias), context);
+  const auto* bias_pointer = with_bias ? bf16_data(d_bias) : nullptr;
+
+  infer::cuda::gemv_bf16(bf16_data(d_weight), bias_pointer, bf16_data(d_input),
+                         bf16_data(d_custom), out_features, in_features,
+                         context.stream());
+  infer::cuda::gemv_bf16_cublas(
+      context.cublas(), bf16_data(d_weight), bias_pointer, bf16_data(d_input),
+      bf16_data(d_cublas), out_features, in_features, context.stream());
+  const auto custom = read_bf16(d_custom, out_features, context);
+  const auto cublas = read_bf16(d_cublas, out_features, context);
+  expect_linear_near(custom, cublas);
+
+  const std::array<int, 3> rows = {0, out_features / 2, out_features - 1};
+  const auto rounded_weight = decode_bf16(weight);
+  const auto rounded_input = decode_bf16(input);
+  const auto rounded_bias = decode_bf16(bias);
+  for (int row : rows) {
+    float expected = with_bias ? rounded_bias[row] : 0.0f;
+    for (int column = 0; column < in_features; ++column) {
+      expected += rounded_weight[static_cast<size_t>(row) * in_features +
+                                 column] *
+                  rounded_input[column];
+    }
+    const float tolerance =
+        std::max(0.004f, std::abs(expected) * 0.008f);
+    EXPECT_NEAR(custom[row], expected, tolerance) << "row " << row;
+  }
+}
+
+}  // namespace
+
+TEST(CudaBFloat16, ShapeAwareGemvMatchesCublasAtQwenShapes) {
+  if (!cuda_available()) GTEST_SKIP();
+  infer::cuda::Context context;
+  check_bf16_gemv_qwen_case(context, 896, 896, true);
+  check_bf16_gemv_qwen_case(context, 128, 896, true);
+  check_bf16_gemv_qwen_case(context, 4864, 896, false);
+  check_bf16_gemv_qwen_case(context, 896, 4864, false);
+  check_bf16_gemv_qwen_case(context, 1024, 1024, true);
+  check_bf16_gemv_qwen_case(context, 897, 896, false);
+  check_bf16_gemv_qwen_case(context, 3, 1024, false);
+  check_bf16_gemv_qwen_case(context, 512, 70, true);
+}
+
+namespace {
+
+void check_lm_head_fused_case(infer::cuda::Context& context, int vocab,
+                              int hidden, int tie_row_a, int tie_row_b) {
+  auto weight = make_gemv_weight(vocab, hidden, 11);
+  for (int column = 0; column < hidden; ++column) {
+    weight[static_cast<size_t>(tie_row_a) * hidden + column] =
+        float_to_bf16(2.0f);
+    weight[static_cast<size_t>(tie_row_b) * hidden + column] =
+        float_to_bf16(2.0f);
+  }
+  const auto input = encode_bf16([&]() {
+    std::vector<float> values(hidden);
+    values[0] = 100.0f;
+    for (int column = 1; column < hidden; ++column) {
+      values[column] = (column % 13 - 6) * 0.0234375f;
+    }
+    return values;
+  }());
+  infer::Buffer d_weight(weight.size() * sizeof(uint16_t),
+                         infer::Device::kCuda);
+  infer::Buffer d_input(input.size() * sizeof(uint16_t),
+                        infer::Device::kCuda);
+  infer::Buffer d_logits(static_cast<size_t>(vocab) * sizeof(uint16_t),
+                         infer::Device::kCuda);
+  infer::Buffer d_logits_ref(static_cast<size_t>(vocab) * sizeof(uint16_t),
+                             infer::Device::kCuda);
+  infer::Buffer d_max_value(((vocab + 7) / 8) * sizeof(float),
+                            infer::Device::kCuda);
+  infer::Buffer d_max_index(((vocab + 7) / 8) * sizeof(int),
+                            infer::Device::kCuda);
+  infer::Buffer d_argmax(sizeof(int), infer::Device::kCuda);
+  infer::Buffer d_argmax_ref(sizeof(int), infer::Device::kCuda);
+  upload_bf16(d_weight, decode_bf16(weight), context);
+  upload_bf16(d_input, decode_bf16(input), context);
+
+  infer::cuda::lm_head_bf16(
+      bf16_data(d_weight), nullptr, bf16_data(d_input), bf16_data(d_logits),
+      static_cast<float*>(d_max_value.data()),
+      static_cast<int*>(d_max_index.data()),
+      static_cast<int*>(d_argmax.data()), vocab, hidden, context.stream());
+  infer::cuda::gemv_bf16_cublas(
+      context.cublas(), bf16_data(d_weight), nullptr, bf16_data(d_input),
+      bf16_data(d_logits_ref), vocab, hidden, context.stream());
+  infer::cuda::argmax_bf16(bf16_data(d_logits_ref), vocab,
+                           static_cast<int*>(d_argmax_ref.data()),
+                           context.stream());
+  const auto logits = read_bf16(d_logits, vocab, context);
+  const auto logits_ref = read_bf16(d_logits_ref, vocab, context);
+  int argmax = -1;
+  int argmax_ref = -1;
+  ASSERT_EQ(cudaMemcpyAsync(&argmax, d_argmax.data(), sizeof(int),
+                            cudaMemcpyDeviceToHost, context.stream()),
+            cudaSuccess);
+  ASSERT_EQ(cudaMemcpyAsync(&argmax_ref, d_argmax_ref.data(), sizeof(int),
+                            cudaMemcpyDeviceToHost, context.stream()),
+            cudaSuccess);
+  context.synchronize();
+  ASSERT_EQ(logits.size(), logits_ref.size());
+  for (size_t index = 0; index < logits.size(); ++index) {
+    const float tolerance =
+        std::max(0.008f, std::abs(logits_ref[index]) * 0.01f);
+    EXPECT_NEAR(logits[index], logits_ref[index], tolerance)
+        << "logit index " << index;
+  }
+  int host_argmax = -1;
+  float host_best = -std::numeric_limits<float>::infinity();
+  for (size_t index = 0; index < logits.size(); ++index) {
+    if (logits[index] > host_best ||
+        (logits[index] == host_best &&
+         static_cast<int>(index) < host_argmax)) {
+      host_best = logits[index];
+      host_argmax = static_cast<int>(index);
+    }
+  }
+  EXPECT_EQ(argmax, host_argmax)
+      << "fused argmax must match argmax over its own logits (vocab=" << vocab
+      << " hidden=" << hidden << ")";
+  EXPECT_EQ(argmax, tie_row_a) << "tie must resolve to the smallest index";
+  EXPECT_EQ(argmax_ref, tie_row_a) << "cuBLAS argmax must also pick the tie";
+}
+
+}  // namespace
+
+TEST(CudaBFloat16, LmHeadFusedWritesFullLogitsAndResolvesTiesToMinIndex) {
+  if (!cuda_available()) GTEST_SKIP();
+  infer::cuda::Context context;
+  check_lm_head_fused_case(context, 512, 64, 3, 3 + 1);
+  check_lm_head_fused_case(context, 1002, 64, 7, 7 + 64);
+  check_lm_head_fused_case(context, 200, 10, 5, 5 + 17);
+  check_lm_head_fused_case(context, 8, 4, 0, 3);
+  check_lm_head_fused_case(context, 64, 896, 1, 31);
+}
+
 TEST(CudaW8A16, GemvAndGemmHandleGroupBoundaryTailAndBias) {
   if (!cuda_available()) GTEST_SKIP();
   infer::cuda::Context context;

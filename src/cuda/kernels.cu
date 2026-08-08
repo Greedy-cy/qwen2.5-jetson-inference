@@ -324,9 +324,15 @@ __global__ void argmax_kernel(const float* values, int n, int* output) {
   best_index[threadIdx.x] = index;
   __syncthreads();
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride && best_value[threadIdx.x + stride] > best_value[threadIdx.x]) {
-      best_value[threadIdx.x] = best_value[threadIdx.x + stride];
-      best_index[threadIdx.x] = best_index[threadIdx.x + stride];
+    if (threadIdx.x < stride) {
+      const float rhs_value = best_value[threadIdx.x + stride];
+      const int rhs_index = best_index[threadIdx.x + stride];
+      if (rhs_value > best_value[threadIdx.x] ||
+          (rhs_value == best_value[threadIdx.x] &&
+           rhs_index < best_index[threadIdx.x])) {
+        best_value[threadIdx.x] = rhs_value;
+        best_index[threadIdx.x] = rhs_index;
+      }
     }
     __syncthreads();
   }
@@ -662,10 +668,15 @@ __global__ void argmax_bf16_kernel(
   best_index[threadIdx.x] = index;
   __syncthreads();
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride &&
-        best_value[threadIdx.x + stride] > best_value[threadIdx.x]) {
-      best_value[threadIdx.x] = best_value[threadIdx.x + stride];
-      best_index[threadIdx.x] = best_index[threadIdx.x + stride];
+    if (threadIdx.x < stride) {
+      const float rhs_value = best_value[threadIdx.x + stride];
+      const int rhs_index = best_index[threadIdx.x + stride];
+      if (rhs_value > best_value[threadIdx.x] ||
+          (rhs_value == best_value[threadIdx.x] &&
+           rhs_index < best_index[threadIdx.x])) {
+        best_value[threadIdx.x] = rhs_value;
+        best_index[threadIdx.x] = rhs_index;
+      }
     }
     __syncthreads();
   }
@@ -673,7 +684,44 @@ __global__ void argmax_bf16_kernel(
 }
 
 
-__global__ void gemv_bf16_kernel(
+__device__ __forceinline__ float dot_bf16_eight(
+    const BFloat16* weight, const BFloat16* input) {
+  const auto* weight_pairs = reinterpret_cast<const BFloat16Pair*>(weight);
+  const auto* input_pairs = reinterpret_cast<const BFloat16Pair*>(input);
+  const float2 w0 = __bfloat1622float2(weight_pairs[0]);
+  const float2 x0 = __bfloat1622float2(input_pairs[0]);
+  const float2 w1 = __bfloat1622float2(weight_pairs[1]);
+  const float2 x1 = __bfloat1622float2(input_pairs[1]);
+  const float2 w2 = __bfloat1622float2(weight_pairs[2]);
+  const float2 x2 = __bfloat1622float2(input_pairs[2]);
+  const float2 w3 = __bfloat1622float2(weight_pairs[3]);
+  const float2 x3 = __bfloat1622float2(input_pairs[3]);
+  float sum = fmaf(w0.x, x0.x, w0.y * x0.y);
+  sum = fmaf(w1.x, x1.x, fmaf(w1.y, x1.y, sum));
+  sum = fmaf(w2.x, x2.x, fmaf(w2.y, x2.y, sum));
+  sum = fmaf(w3.x, x3.x, fmaf(w3.y, x3.y, sum));
+  return sum;
+}
+
+__device__ __forceinline__ float warp_reduce_sum(float value) {
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    value += __shfl_down_sync(0xffffffffu, value, offset);
+  }
+  return value;
+}
+
+__device__ __forceinline__ void load_input_to_shared(
+    BFloat16* shared_input, const BFloat16* input, int in_features,
+    int threads) {
+  const int vectors = in_features / 8;
+  for (int index = threadIdx.x; index < vectors; index += threads) {
+    *reinterpret_cast<float4*>(shared_input + index * 8) =
+        *reinterpret_cast<const float4*>(input + index * 8);
+  }
+}
+
+__global__ void gemv_bf16_scalar_kernel(
     const BFloat16* weight, const BFloat16* bias, const BFloat16* input,
     BFloat16* output, int out_features, int in_features) {
   const int row = blockIdx.x;
@@ -713,6 +761,173 @@ __global__ void gemv_bf16_kernel(
     const float bias_value = bias ? __bfloat162float(bias[row]) : 0.0f;
     output[row] = __float2bfloat16_rn(reduction[0] + bias_value);
   }
+}
+
+template <int RowsPerBlock, int WarpsPerRow>
+__global__ void gemv_bf16_fast_kernel(
+    const BFloat16* weight, const BFloat16* bias, const BFloat16* input,
+    BFloat16* output, int out_features, int in_features) {
+  constexpr int kWarps = 8;
+  constexpr int kThreads = kWarps * 32;
+  static_assert(kWarps == RowsPerBlock * WarpsPerRow,
+                "warps must partition the block rows");
+  extern __shared__ __align__(16) BFloat16 input_shared[];
+  __shared__ float partials[kWarps];
+
+  const int warp = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  const int row = blockIdx.x * RowsPerBlock + warp / WarpsPerRow;
+
+  load_input_to_shared(input_shared, input, in_features, kThreads);
+  __syncthreads();
+
+  float sum = 0.0f;
+  const int vectors = in_features / 8;
+  if (row < out_features) {
+    const BFloat16* row_weight =
+        weight + static_cast<size_t>(row) * in_features;
+    for (int index = lane + (warp % WarpsPerRow) * 32; index < vectors;
+         index += 32 * WarpsPerRow) {
+      sum += dot_bf16_eight(row_weight + index * 8,
+                            input_shared + index * 8);
+    }
+  }
+  sum = warp_reduce_sum(sum);
+  if (lane == 0) partials[warp] = sum;
+  if constexpr (WarpsPerRow > 1) {
+    __syncthreads();
+    if (threadIdx.x < RowsPerBlock) {
+      float total = 0.0f;
+#pragma unroll
+      for (int index = 0; index < WarpsPerRow; ++index) {
+        total += partials[threadIdx.x * WarpsPerRow + index];
+      }
+      const int current_row = blockIdx.x * RowsPerBlock + threadIdx.x;
+      if (current_row < out_features) {
+        const float bias_value =
+            bias ? __bfloat162float(bias[current_row]) : 0.0f;
+        output[current_row] = __float2bfloat16_rn(total + bias_value);
+      }
+    }
+  } else {
+    if (row < out_features) {
+      const float bias_value = bias ? __bfloat162float(bias[row]) : 0.0f;
+      output[row] = __float2bfloat16_rn(partials[warp] + bias_value);
+    }
+  }
+}
+
+__global__ void lm_head_bf16_kernel(
+    const BFloat16* weight, const BFloat16* bias, const BFloat16* input,
+    BFloat16* logits, float* block_max_value, int* block_max_index,
+    int vocab, int in_features) {
+  constexpr int kRowsPerBlock = 8;
+  constexpr int kThreads = 256;
+  extern __shared__ __align__(16) BFloat16 input_shared[];
+  __shared__ float row_sums[kRowsPerBlock];
+
+  const int warp = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  const int row = blockIdx.x * kRowsPerBlock + warp;
+  const bool active = row < vocab;
+  const bool vector_ok =
+      (in_features & 7) == 0 &&
+      (reinterpret_cast<uintptr_t>(input) & 15) == 0 &&
+      (reinterpret_cast<uintptr_t>(weight) & 15) == 0;
+
+  if (vector_ok) {
+    load_input_to_shared(input_shared, input, in_features, kThreads);
+  } else {
+    for (int index = threadIdx.x; index < in_features; index += kThreads) {
+      input_shared[index] = input[index];
+    }
+  }
+  __syncthreads();
+
+  float sum = 0.0f;
+  if (active) {
+    const BFloat16* row_weight =
+        weight + static_cast<size_t>(row) * in_features;
+    if (vector_ok) {
+      const int vectors = in_features / 8;
+      for (int index = lane; index < vectors; index += 32) {
+        sum += dot_bf16_eight(row_weight + index * 8,
+                              input_shared + index * 8);
+      }
+      for (int column = lane + vectors * 8; column < in_features;
+           column += 32) {
+        sum = fmaf(__bfloat162float(row_weight[column]),
+                   __bfloat162float(input_shared[column]), sum);
+      }
+    } else {
+      for (int column = lane; column < in_features; column += 32) {
+        sum = fmaf(__bfloat162float(row_weight[column]),
+                   __bfloat162float(input_shared[column]), sum);
+      }
+    }
+  }
+  sum = warp_reduce_sum(sum);
+  if (lane == 0) {
+    if (active) {
+      const float bias_value = bias ? __bfloat162float(bias[row]) : 0.0f;
+      const BFloat16 logit = __float2bfloat16_rn(sum + bias_value);
+      logits[row] = logit;
+      row_sums[warp] = __bfloat162float(logit);
+    } else {
+      row_sums[warp] = -FLT_MAX;
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float best = -FLT_MAX;
+    int best_index = -1;
+    for (int index = 0; index < kRowsPerBlock; ++index) {
+      const int candidate_row = blockIdx.x * kRowsPerBlock + index;
+      if (candidate_row >= vocab) break;
+      const float candidate = row_sums[index];
+      if (candidate > best || (candidate == best && candidate_row < best_index)) {
+        best = candidate;
+        best_index = candidate_row;
+      }
+    }
+    block_max_value[blockIdx.x] = best;
+    block_max_index[blockIdx.x] = best_index;
+  }
+}
+
+__global__ void lm_head_reduce_kernel(
+    const float* block_max_value, const int* block_max_index,
+    int block_count, int* argmax) {
+  __shared__ float best_value[256];
+  __shared__ int best_index[256];
+  float value = -FLT_MAX;
+  int index = -1;
+  for (int i = threadIdx.x; i < block_count; i += blockDim.x) {
+    const float candidate = block_max_value[i];
+    const int candidate_index = block_max_index[i];
+    if (candidate > value ||
+        (candidate == value && candidate_index < index)) {
+      value = candidate;
+      index = candidate_index;
+    }
+  }
+  best_value[threadIdx.x] = value;
+  best_index[threadIdx.x] = index;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      const float rhs_value = best_value[threadIdx.x + stride];
+      const int rhs_index = best_index[threadIdx.x + stride];
+      if (rhs_value > best_value[threadIdx.x] ||
+          (rhs_value == best_value[threadIdx.x] &&
+           rhs_index < best_index[threadIdx.x])) {
+        best_value[threadIdx.x] = rhs_value;
+        best_index[threadIdx.x] = rhs_index;
+      }
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) *argmax = best_index[0];
 }
 
 template <int BlockM>
@@ -1439,8 +1654,41 @@ void argmax_bf16(const BFloat16* values, int n, int* output,
 void gemv_bf16(const BFloat16* weight, const BFloat16* bias,
                 const BFloat16* input, BFloat16* output, int out_features,
                 int in_features, cudaStream_t stream) {
-  gemv_bf16_kernel<<<out_features, 256, 0, stream>>>(
-      weight, bias, input, output, out_features, in_features);
+  constexpr int threads = 256;
+  const bool aligned = in_features >= 8 && (in_features & 7) == 0 &&
+                       (reinterpret_cast<uintptr_t>(weight) & 15) == 0 &&
+                       (reinterpret_cast<uintptr_t>(input) & 15) == 0;
+  if (aligned && in_features <= 1024) {
+    constexpr int rows_per_block = 8;
+    const dim3 grid((out_features + rows_per_block - 1) / rows_per_block);
+    gemv_bf16_fast_kernel<rows_per_block, 1><<<grid, threads,
+        in_features * sizeof(BFloat16), stream>>>(
+        weight, bias, input, output, out_features, in_features);
+  } else if (aligned) {
+    constexpr int rows_per_block = 2;
+    const dim3 grid((out_features + rows_per_block - 1) / rows_per_block);
+    gemv_bf16_fast_kernel<rows_per_block, 4><<<grid, threads,
+        in_features * sizeof(BFloat16), stream>>>(
+        weight, bias, input, output, out_features, in_features);
+  } else {
+    gemv_bf16_scalar_kernel<<<out_features, threads, 0, stream>>>(
+        weight, bias, input, output, out_features, in_features);
+  }
+  INFER_CUDA_CHECK(cudaGetLastError());
+}
+
+void lm_head_bf16(const BFloat16* weight, const BFloat16* bias,
+                  const BFloat16* input, BFloat16* logits,
+                  float* block_max_value, int* block_max_index, int* argmax,
+                  int vocab, int in_features, cudaStream_t stream) {
+  constexpr int rows_per_block = 8;
+  const int block_count = (vocab + rows_per_block - 1) / rows_per_block;
+  lm_head_bf16_kernel<<<block_count, 256,
+      in_features * sizeof(BFloat16), stream>>>(
+      weight, bias, input, logits, block_max_value, block_max_index, vocab,
+      in_features);
+  lm_head_reduce_kernel<<<1, 256, 0, stream>>>(
+      block_max_value, block_max_index, block_count, argmax);
   INFER_CUDA_CHECK(cudaGetLastError());
 }
 

@@ -58,7 +58,8 @@ class Qwen2Model {
   int position() const { return position_; }
   bool has_prefilled() const { return has_prefilled_; }
   size_t workspace_bytes() const {
-    return workspace_.bytes() + prefill_workspace_.bytes() + prefill_tokens_.bytes();
+    return workspace_.bytes() + prefill_workspace_.bytes() +
+           prefill_tokens_.bytes() + lm_head_workspace_.bytes();
   }
   size_t prefill_workspace_bytes() const {
     return prefill_workspace_.bytes() + prefill_tokens_.bytes();
@@ -75,6 +76,9 @@ class Qwen2Model {
   void linear_cuda_bf16(std::string_view weight_name,
                          std::string_view bias_name,
                          const __nv_bfloat16* input, __nv_bfloat16* output,
+                         int out_features, int in_features);
+  void lm_head_cuda_bf16(std::string_view weight_name,
+                         const __nv_bfloat16* input, __nv_bfloat16* logits,
                          int out_features, int in_features);
   void linear_cpu_fp32_batch(std::string_view weight_name,
                              std::string_view bias_name, const float* input,
@@ -117,6 +121,7 @@ class Qwen2Model {
   Buffer prefill_tokens_;
   Buffer kv_cache_;
   Buffer argmax_buffer_;
+  Buffer lm_head_workspace_;
   std::unique_ptr<cuda::Context> cuda_context_;
 
   float* x_{nullptr};
@@ -162,6 +167,8 @@ class Qwen2Model {
   __nv_bfloat16* bf16_prefill_gate_{nullptr};
   __nv_bfloat16* bf16_prefill_up_{nullptr};
   __nv_bfloat16* bf16_prefill_mlp_{nullptr};
+  float* lm_head_max_value_{nullptr};
+  int* lm_head_max_index_{nullptr};
   int position_{0};
   bool has_prefilled_{false};
 };

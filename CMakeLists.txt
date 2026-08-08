@@ -52,8 +52,8 @@ add_executable(llm_infer src/main.cpp)
 target_link_libraries(llm_infer PRIVATE infer_core)
 
 
-add_executable(bf16_linear_benchmark tools/benchmark_bf16_linear.cpp)
-target_link_libraries(bf16_linear_benchmark PRIVATE infer_core)
+add_executable(linear_benchmark tools/linear_benchmark.cpp)
+target_link_libraries(linear_benchmark PRIVATE infer_core)
 
 option(INFER_BUILD_TESTS "Build unit tests" ON)
 if(INFER_BUILD_TESTS)
