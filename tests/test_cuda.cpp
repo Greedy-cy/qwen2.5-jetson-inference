@@ -727,7 +727,9 @@ void check_w8a16_linear_case(infer::cuda::Context& context, int tokens,
             << " in_features=" << in_features
             << " max_abs_error=" << max_abs_error << '\n';
   for (int row = 0; row < out_features; ++row) {
-    EXPECT_EQ(gemv[row], gemm[row]) << "row " << row;
+    const float tolerance =
+        std::max(0.015625f, std::abs(gemm[row]) * 0.01f);
+    EXPECT_NEAR(gemv[row], gemm[row], tolerance) << "row " << row;
   }
 }
 
@@ -1020,4 +1022,23 @@ TEST(CudaW8A16, GemvAndGemmMatchDequantizedReferenceAtQwenShapes) {
   check_w8a16_linear_case(context, 2, 128, 896, true);
   check_w8a16_linear_case(context, 2, 4864, 896, false);
   check_w8a16_linear_case(context, 2, 896, 4864, false);
+}
+
+TEST(CudaW8A16, GemmFastPathsMatchDequantizedReferenceAtPrefillShapes) {
+  if (!cuda_available()) GTEST_SKIP();
+  infer::cuda::Context context;
+  for (const int tokens : {32, 128, 512}) {
+    check_w8a16_linear_case(context, tokens, 896, 896, true);
+    check_w8a16_linear_case(context, tokens, 4864, 896, false);
+    check_w8a16_linear_case(context, tokens, 896, 4864, false);
+  }
+}
+
+TEST(CudaW8A16, GemvFastPathMatchesFallbackForAlignedK) {
+  if (!cuda_available()) GTEST_SKIP();
+  infer::cuda::Context context;
+  check_w8a16_linear_case(context, 1, 896, 1024, true);
+  check_w8a16_linear_case(context, 1, 896, 1216, false);
+  check_w8a16_linear_case(context, 1, 24, 896, true);
+  check_w8a16_linear_case(context, 1, 96, 912, false);
 }
