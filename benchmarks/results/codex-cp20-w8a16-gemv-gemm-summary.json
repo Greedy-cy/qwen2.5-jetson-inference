@@ -101,6 +101,28 @@
   "ratio_percent": 64.9,
   "archive_mib": 612.71
  },
+ "ncu": {
+  "lm_head_bf16_kernel": {
+   "grid": "18992x256",
+   "duration_ms": 3.5,
+   "memory_throughput_percent": 69.64,
+   "compute_throughput_percent": 41.89,
+   "l2_hit_percent": 1.91,
+   "warp_stall": "57.8% long scoreboard L1TEX",
+   "occupancy_percent": 61.06,
+   "note": "same profile as CP19; unchanged BF16 fused kernel, bandwidth-bound"
+  },
+  "gemv_w8a16_fast_kernel_8_1": {
+   "grid": "112x256 (K=896)",
+   "duration_us": 23.84,
+   "memory_throughput_percent": 32.91,
+   "compute_throughput_percent": 37.46,
+   "l2_hit_percent": 2.86,
+   "warp_stall": "51% long scoreboard L1TEX",
+   "note": "small-grid latency-bound, same shape as CP19 bf16 gemv; half the weight bytes"
+  },
+  "gemv_w8a16_fast_kernel_2_4": "not captured in profiled set (same structure, 4 warps/row)"
+ },
  "gates": {
   "w8_decode_at_least_85pct_of_w16": {"threshold": 85, "measured": 117.8, "passed": true},
   "w8_prefill_p32_at_least_70pct": {"threshold": 70, "measured": 71.9, "passed": true},

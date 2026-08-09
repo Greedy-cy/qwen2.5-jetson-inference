@@ -159,7 +159,27 @@ I2F+FMUL+F2F，约 5 指令/element vs mma ~0.25 指令/element），已接近�
 | `gemm_w8a16_wmma_async_kernel`（prefill） | 9.4% |
 | `attention_decode_bf16_kernel` | 2.7% |
 
-## Nsight Compute（用户手动执行，待回贴）
+## Nsight Compute（用户手动执行，`--set full`）
+
+命令（修正后）：
+
+```text
+sudo /usr/local/cuda-12.6/bin/ncu --set full \
+  --kernel-name "regex:gemv_w8a16_fast_kernel|lm_head_bf16_kernel" \
+  --launch-count 2 --target-processes all build/llm_infer generate ...
+```
+
+- `lm_head_bf16_kernel`（18992 blocks × 256，duration `3.50 ms`）：
+  memory throughput `69.64%`，compute `41.89%`，L2 hit `1.91%`；warp 每发指
+  令 17.4 cycle，其中 57.8% 为 long-scoreboard L1TEX stall；occupancy 61%
+  （56 regs 受限）。与 CP19 的 profile（69.45% / 3.51 ms）一致 —— W8 的
+  tied LM Head 与 W16 共用同一 BF16 融合 kernel，无变化，仍为带宽受限。
+- `gemv_w8a16_fast_kernel<8,1>`（112 blocks × 256，duration `23.84 us`）：
+  memory throughput `32.91%`，compute `37.46%`，L2 hit `2.86%`；warp 每发指
+  令 16.0 cycle，其中 51% 为 long-scoreboard L1TEX stall；eligible warps
+  `0.82`/scheduler，3.5 waves/SM。与 CP19 的 BF16 GEMV 同属 small-grid
+  latency-bound 形态；W8 以一半的权重字节达到相同形态并反超 W16 decode。
+- `<2,4>`（down_proj）实例未进入本次 profiled 集合（结构相同，4 warps/row）。
 
 ## 内存与能耗
 
