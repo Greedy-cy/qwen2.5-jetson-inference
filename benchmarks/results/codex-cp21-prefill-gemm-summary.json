@@ -1,0 +1,62 @@
+{
+ "schema_version": 1,
+ "report_id": "CODEX-CP21",
+ "title": "Prefill GEMM attack: bf16 m128n128 BlockK=64 deepening",
+ "status": "implemented_gates_passed_gemm_micro_gap_documented",
+ "measurement_commit": "f5fcf34",
+ "git_dirty": false,
+ "model": "Qwen2.5-0.5B-Instruct",
+ "model_archive_sha256_w16": "f8b6b16a3a85d70083bfd7f822a7d587332982b0f0e27691512efa844855b2a6",
+ "device": "Jetson Orin Nano Super 8GB",
+ "cuda": "12.6",
+ "compute_capability": "8.7",
+ "clocks": "GPU locked at 1020 MHz",
+ "protocol": {
+  "microbenchmark": {"warmup": 20, "repeat": 100, "timing": "CUDA Event", "aggregate": "7-linear p50 sum"},
+  "e2e_sweep": {"prompts": [128, 512], "output": 1, "max_seq_len": 512, "warmup": 5, "repeat": 20},
+  "canonical": {"prompt": 32, "output": 128, "max_seq_len": 256, "warmup": 5, "repeat": 20}
+ },
+ "implementation_change": {
+  "kernel": "gemm_bf16_wmma_async_m128n128_kernel",
+  "blockk": "32 -> 64 (SharedK 40 -> 72, stages 28 -> 14, per-stage warp mma instrs 18 -> 36)",
+  "launch_bounds": "__launch_bounds__(512, 2) -> 64 regs (was 66, 3 spills)",
+  "dynamic_shared_bytes": 73728,
+  "pipeline": "2-buffer issue-ahead, wait_prior(1) before mma, end-of-iteration syncthreads (unchanged shape)"
+ },
+ "variants_tested_and_rejected": [
+  {"variant": "4-buffer deep pipeline (80KB, 1 block/SM)", "p128_ms": 1.0972, "p512_ms": 3.4808, "reason": "lost cross-block overlap"},
+  {"variant": "2-buffer issue-ahead at BlockK=32", "p128_ms": 1.0778, "p512_ms": 3.4116, "reason": "single-iteration slack insufficient"},
+  {"variant": "m32n64 tiling for large tokens", "p128_ms": 1.6355, "p512_ms": 6.955, "reason": "one accumulator per warp, fragment load explosion"},
+  {"variant": "SharedK=80 at BlockK=64", "p128_ms": 1.0675, "p512_ms": 3.4578, "reason": "store conflict pattern not improved"}
+ ],
+ "ncu": {
+  "duration_us": 206.98,
+  "grid": 28,
+  "memory_throughput_percent": 45.1,
+  "compute_throughput_percent": 43.66,
+  "l2_hit_percent": 77.03,
+  "warp_cycles_per_issued_instruction": 15.75,
+  "achieved_occupancy_percent": 58.66,
+  "diagnosis": "latency-bound, no pipe saturated; 4.1-way shared-store bank conflicts on cp.async staging (~26% est speedup, needs XOR swizzle incompatible with wmma::load_matrix_sync)"
+ },
+ "microbenchmark_7_sum_ms": [
+  {"tokens": 128, "custom": 0.9904, "cublas": 0.6021, "attainment_percent": 60.6, "prior": 57.6},
+  {"tokens": 512, "custom": 3.1824, "cublas": 2.0097, "attainment_percent": 63.1, "prior": 60.5}
+ ],
+ "e2e_sweep": [
+  {"prompt": 128, "custom_tok_per_s": 2262.8, "cublas_tok_per_s": 2774.4, "attainment_percent": 81.6, "prior": 80.2},
+  {"prompt": 512, "custom_tok_per_s": 1036.4, "cublas_tok_per_s": 1115.5, "attainment_percent": 92.9, "prior": 92.2}
+ ],
+ "canonical": {
+  "custom": {"prefill": 1658.78, "ttft_ms": 19.29, "decode": 67.75, "total_ms": 1893.87, "energy_j_per_token": 0.2821},
+  "cublas": {"prefill": 1896.65, "ttft_ms": 16.87, "decode": 67.0, "total_ms": 1912.28},
+  "prefill_attainment_percent": 87.5
+ },
+ "gates": {
+  "p128_e2e_at_least_80pct_cublas": {"threshold": 80, "measured": 81.6, "passed": true},
+  "p512_e2e_at_least_90pct_cublas": {"threshold": 90, "measured": 92.9, "passed": true},
+  "canonical_no_regression": {"prefill": 87.5, "decode": 67.75, "passed": true},
+  "ctest": "32/32",
+  "gemm_micro_note": "60.6%/63.1% of cuBLAS; latency-bound; practical floor of the WMMA+cp.async path on GA10B; remaining gap is cuBLAS swizzle+ldmatrix tuning, deliberately not replicated (CP19 end-to-end-first decision)"
+ }
+}
