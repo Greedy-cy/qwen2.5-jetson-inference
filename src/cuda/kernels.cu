@@ -1167,7 +1167,8 @@ __global__ void gemm_bf16_wmma_async_kernel(
   }
 }
 
-__global__ void gemm_bf16_wmma_async_m128n128_kernel(
+__global__ void __launch_bounds__(512, 2)
+gemm_bf16_wmma_async_m128n128_kernel(
     const BFloat16* weight, const BFloat16* bias, const BFloat16* input,
     BFloat16* output, int tokens, int out_features, int in_features) {
   namespace wmma = nvcuda::wmma;
@@ -1176,8 +1177,9 @@ __global__ void gemm_bf16_wmma_async_m128n128_kernel(
   constexpr int kWmmaK = 16;
   constexpr int kBlockM = 128;
   constexpr int kBlockN = 128;
-  constexpr int kBlockK = 32;
+  constexpr int kBlockK = 64;
   constexpr int kSharedK = kBlockK + 8;
+  constexpr int kBuffers = 2;
   constexpr int kWarpColumns = kBlockN / kWmmaN;
   constexpr int kAccumulatorCount = 4;
 
@@ -1185,11 +1187,8 @@ __global__ void gemm_bf16_wmma_async_m128n128_kernel(
     BFloat16 input[kBlockM * kSharedK];
     BFloat16 weight[kBlockN * kSharedK];
   };
-  union SharedStorage {
-    OperandStorage operands[2];
-    float warp_output[16][kWmmaM * kWmmaN];
-  };
-  __shared__ __align__(32) SharedStorage shared;
+  extern __shared__ __align__(32) char shared_raw[];
+  auto* operands = reinterpret_cast<OperandStorage*>(shared_raw);
 
   const int warp = threadIdx.x / warpSize;
   const int warp_row_group = warp / kWarpColumns;
@@ -1205,27 +1204,34 @@ __global__ void gemm_bf16_wmma_async_m128n128_kernel(
     wmma::fill_fragment(accumulators[index], 0.0f);
   }
 
-  load_bf16_wmma_stage_async<kBlockM, kBlockN, kBlockK, kSharedK>(
-      weight, input, shared.operands[0].input, shared.operands[0].weight,
-      block_token, block_row, 0, in_features);
-  __pipeline_commit();
-  __pipeline_wait_prior(0);
+#pragma unroll
+  for (int buffer = 0; buffer < kBuffers - 1; ++buffer) {
+    load_bf16_wmma_stage_async<kBlockM, kBlockN, kBlockK, kSharedK>(
+        weight, input, operands[buffer].input, operands[buffer].weight,
+        block_token, block_row, buffer * kBlockK, in_features);
+    __pipeline_commit();
+  }
+  __pipeline_wait_prior(kBuffers - 2);
   __syncthreads();
 
-  int current_buffer = 0;
   for (int stage = 0; stage < stage_count; ++stage) {
-    const int next_stage = stage + 1;
-    if (next_stage < stage_count) {
-      const int next_buffer = current_buffer ^ 1;
+    const int future_stage = stage + kBuffers - 1;
+    if (future_stage < stage_count) {
+      const int future_buffer = future_stage % kBuffers;
       load_bf16_wmma_stage_async<kBlockM, kBlockN, kBlockK, kSharedK>(
-          weight, input, shared.operands[next_buffer].input,
-          shared.operands[next_buffer].weight, block_token, block_row,
-          next_stage * kBlockK, in_features);
+          weight, input, operands[future_buffer].input,
+          operands[future_buffer].weight, block_token, block_row,
+          future_stage * kBlockK, in_features);
       __pipeline_commit();
     }
 
-    const BFloat16* input_tile = shared.operands[current_buffer].input;
-    const BFloat16* weight_tile = shared.operands[current_buffer].weight;
+    const int wait_depth = min(kBuffers - 1, stage_count - 1 - stage);
+    __pipeline_wait_prior(wait_depth);
+    __syncthreads();
+
+    const int current_buffer = stage % kBuffers;
+    const BFloat16* input_tile = operands[current_buffer].input;
+    const BFloat16* weight_tile = operands[current_buffer].weight;
 #pragma unroll
     for (int column = 0; column < kBlockK; column += kWmmaK) {
       wmma::fragment<wmma::matrix_b, kWmmaM, kWmmaN, kWmmaK, BFloat16,
@@ -1247,16 +1253,11 @@ __global__ void gemm_bf16_wmma_async_m128n128_kernel(
                        accumulators[index]);
       }
     }
-
-    if (next_stage < stage_count) {
-      __pipeline_wait_prior(0);
-      __syncthreads();
-      current_buffer ^= 1;
-    }
+    __syncthreads();
   }
-  __syncthreads();
 
-  float* warp_output = shared.warp_output[warp];
+  auto* warp_output =
+      reinterpret_cast<float*>(shared_raw) + warp * kWmmaM * kWmmaN;
 #pragma unroll
   for (int index = 0; index < kAccumulatorCount; ++index) {
     const int tile_row = warp_row_group + index * 2;
@@ -2083,16 +2084,27 @@ void gemv_bf16_cublas(cublasHandle_t handle, const BFloat16* weight,
 }
 
 void gemm_bf16(const BFloat16* weight, const BFloat16* bias,
-                const BFloat16* input, BFloat16* output, int tokens,
-                int out_features, int in_features, cudaStream_t stream) {
+               const BFloat16* input, BFloat16* output, int tokens,
+               int out_features, int in_features, cudaStream_t stream) {
   constexpr int block_n = 64;
   constexpr int threads = 256;
+  constexpr int large_shared_bytes =
+      2 * (128 * (64 + 8) + 128 * (64 + 8)) * sizeof(BFloat16);
   const bool aligned = out_features % block_n == 0 && in_features % 64 == 0;
   if (aligned && tokens % 128 == 0 && out_features % 128 == 0) {
+    static const bool large_configured = []() {
+      const cudaError_t error = cudaFuncSetAttribute(
+          gemm_bf16_wmma_async_m128n128_kernel,
+          cudaFuncAttributeMaxDynamicSharedMemorySize, large_shared_bytes);
+      return error == cudaSuccess;
+    }();
+    INFER_CHECK(large_configured,
+                "failed to raise dynamic shared memory for m128n128 kernel");
     constexpr int block_m = 128;
     constexpr int large_block_n = 128;
     const dim3 grid(out_features / large_block_n, tokens / block_m);
-    gemm_bf16_wmma_async_m128n128_kernel<<<grid, 512, 0, stream>>>(
+    gemm_bf16_wmma_async_m128n128_kernel<<<grid, 512, large_shared_bytes,
+                                            stream>>>(
         weight, bias, input, output, tokens, out_features, in_features);
   } else if (aligned && tokens % 32 == 0) {
     constexpr int block_m = 32;
