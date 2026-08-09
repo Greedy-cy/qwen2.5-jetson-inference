@@ -46,7 +46,11 @@ void usage() {
       "                     [--linear-kernel custom|cublas]\n"
       "  llm_infer benchmark --model DIR (--prompt TEXT | --token-ids CSV)\n"
       "                      [--warmup 5] [--repeat 20] [--json FILE]\n"
-      "                      [--telemetry-markers] [other generation options]\n";
+      "                      [--telemetry-markers] [other generation options]\n\n"
+      "Supported paths:\n"
+      "  CPU  : fp32 (no --linear-kernel)\n"
+      "  CUDA : w16a16 custom (default) or cublas baseline\n"
+      "  CUDA : w8a16 custom only\n";
 }
 
 Device parse_device(const std::string& text) {
@@ -71,13 +75,32 @@ Precision parse_precision(const std::string& text) {
 infer::RuntimeOptions runtime_options(const Arguments& args) {
   infer::RuntimeOptions options;
   options.backend = parse_device(args.get("--backend", "cuda"));
-  options.precision = parse_precision(args.get("--precision", "fp32"));
+  const std::string default_precision =
+      options.backend == Device::kCpu ? "fp32" : "w16a16";
+  options.precision =
+      parse_precision(args.get("--precision", default_precision));
   options.max_sequence_length = args.get_int("--max-seq-len", 2048);
   const std::string linear_kernel = args.get("--linear-kernel");
+
+  if (options.backend == Device::kCpu) {
+    if (options.precision != Precision::kFloat32) {
+      throw infer::Error("CPU backend supports fp32 only");
+    }
+    if (!linear_kernel.empty()) {
+      throw infer::Error("--linear-kernel is only valid for CUDA w16a16");
+    }
+    return options;
+  }
+  if (options.precision == Precision::kFloat32) {
+    throw infer::Error(
+        "CUDA fp32 was removed; use CUDA w16a16/w8a16 or CPU fp32");
+  }
   if (!linear_kernel.empty()) {
     options.linear_kernel = parse_linear_kernel(linear_kernel);
-  } else if (options.precision == Precision::kW16A16) {
-    options.linear_kernel = LinearKernel::kCustom;
+  }
+  if (options.precision == Precision::kW8A16 &&
+      options.linear_kernel != LinearKernel::kCustom) {
+    throw infer::Error("CUDA w8a16 supports the custom linear kernel only");
   }
   return options;
 }

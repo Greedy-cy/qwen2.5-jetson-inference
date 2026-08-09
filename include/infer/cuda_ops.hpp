@@ -21,54 +21,6 @@ class Context {
   cublasHandle_t cublas_{nullptr};
 };
 
-void embedding(const float* table, int token, float* output, int hidden_size,
-               cudaStream_t stream);
-void rms_norm(const float* input, const float* weight, float* output,
-              int n, float epsilon, cudaStream_t stream);
-void gemv_fp32(const float* weight, const float* bias, const float* input,
-               float* output, int out_features, int in_features, cudaStream_t stream);
-void gemv_fp32_cublas(cublasHandle_t handle, const float* weight, const float* bias,
-                      const float* input, float* output, int out_features,
-                      int in_features, cudaStream_t stream);
-void gemm_fp32(const float* weight, const float* input, float* output,
-               int tokens, int out_features, int in_features, cudaStream_t stream);
-void rope(float* q, float* k, int num_heads, int num_kv_heads, int head_dim,
-          int position, float theta, cudaStream_t stream);
-void store_kv(const float* key, const float* value, float* key_cache,
-              float* value_cache, int kv_heads, int head_dim, int position,
-              int max_sequence_length, cudaStream_t stream);
-void attention_decode(const float* q, const float* key_cache, const float* value_cache,
-                      float* output, int num_heads, int num_kv_heads, int head_dim,
-                      int sequence_length, int max_sequence_length, cudaStream_t stream);
-void embedding_batch(const float* table, const int* tokens, float* output,
-                     int token_count, int hidden_size, cudaStream_t stream);
-void rms_norm_batch(const float* input, const float* weight, float* output,
-                    int token_count, int hidden_size, float epsilon,
-                    cudaStream_t stream);
-void gemm_fp32_cublas(cublasHandle_t handle, const float* weight,
-                      const float* input, float* output, int tokens,
-                      int out_features, int in_features, cudaStream_t stream);
-void add_bias_batch(float* output, const float* bias, int tokens,
-                    int out_features, cudaStream_t stream);
-void rope_batch(float* q, float* k, int token_count, int num_heads,
-                int num_kv_heads, int head_dim, int start_position,
-                float theta, cudaStream_t stream);
-void store_kv_batch(const float* key, const float* value, float* key_cache,
-                    float* value_cache, int token_count, int kv_heads,
-                    int head_dim, int max_sequence_length,
-                    cudaStream_t stream);
-void attention_prefill(const float* q, const float* key_cache,
-                       const float* value_cache, float* output,
-                       int token_count, int num_heads, int num_kv_heads,
-                       int head_dim, int max_sequence_length,
-                       cudaStream_t stream);
-void add_inplace(float* x, const float* residual, int n, cudaStream_t stream);
-void silu_mul(const float* gate, const float* up, float* output, int n,
-              cudaStream_t stream);
-void argmax(const float* values, int n, int* output, cudaStream_t stream);
-
-
-
 void gemv_bf16(const __nv_bfloat16* weight, const __nv_bfloat16* bias,
                 const __nv_bfloat16* input, __nv_bfloat16* output,
                 int out_features, int in_features, cudaStream_t stream);

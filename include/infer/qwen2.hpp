@@ -15,7 +15,7 @@ inline const char* to_string(LinearKernel value) {
 
 struct RuntimeOptions {
   Device backend{Device::kCuda};
-  Precision precision{Precision::kFloat32};
+  Precision precision{Precision::kW16A16};
   int max_sequence_length{2048};
   LinearKernel linear_kernel{LinearKernel::kCustom};
 };
@@ -72,7 +72,7 @@ class Qwen2Model {
   void initialize_workspace();
   void linear(std::string_view weight_name, std::string_view bias_name,
               const float* input, float* output, int out_features,
-              int in_features, bool prefer_cublas = false);
+              int in_features);
   void linear_cuda_bf16(std::string_view weight_name,
                          std::string_view bias_name,
                          const __nv_bfloat16* input, __nv_bfloat16* output,
@@ -84,10 +84,6 @@ class Qwen2Model {
                              std::string_view bias_name, const float* input,
                              float* output, int token_count, int out_features,
                              int in_features);
-  void linear_cuda_batch(std::string_view weight_name,
-                         std::string_view bias_name, const float* input,
-                         float* output, int token_count, int out_features,
-                         int in_features);
   void linear_cuda_bf16_batch(std::string_view weight_name,
                               std::string_view bias_name,
                               const __nv_bfloat16* input,
@@ -105,9 +101,7 @@ class Qwen2Model {
   int decode_token(int token, int position);
   int decode_token_cpu(int token, int position);
   int prefill_cpu_fp32(const std::vector<int>& prompt_tokens);
-  int prefill_cuda(const std::vector<int>& prompt_tokens);
   int prefill_cuda_bf16(const std::vector<int>& prompt_tokens);
-  int decode_token_cuda(int token, int position);
   int decode_token_cuda_bf16(int token, int position);
   void synchronize() const;
 

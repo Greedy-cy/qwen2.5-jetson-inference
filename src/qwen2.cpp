@@ -37,7 +37,16 @@ Qwen2Model::Qwen2Model(const std::filesystem::path& model_directory,
               "max sequence length exceeds model limit");
   INFER_CHECK(options_.backend != Device::kCpu ||
                   options_.precision == Precision::kFloat32,
-              "CPU backend currently supports FP32 only");
+              "CPU backend supports FP32 only");
+  INFER_CHECK(options_.backend != Device::kCuda ||
+                  options_.precision != Precision::kFloat32,
+              "CUDA FP32 was removed; use W16A16 or W8A16");
+  INFER_CHECK(options_.backend != Device::kCpu ||
+                  options_.linear_kernel == LinearKernel::kCustom,
+              "CPU backend does not accept a linear kernel selection");
+  INFER_CHECK(options_.precision != Precision::kW8A16 ||
+                  options_.linear_kernel == LinearKernel::kCustom,
+              "W8A16 supports the custom linear kernel only");
   initialize_weights();
   initialize_workspace();
 }
@@ -275,27 +284,18 @@ void Qwen2Model::lm_head_cuda_bf16(std::string_view weight_name,
   }
 }
 
-void Qwen2Model::linear(std::string_view weight_name, std::string_view bias_name,
-                        const float* input, float* output, int out_features,
-                        int in_features, bool prefer_cublas) {
+void Qwen2Model::linear(std::string_view weight_name,
+                        std::string_view bias_name, const float* input,
+                        float* output, int out_features, int in_features) {
+  INFER_CHECK(options_.backend == Device::kCpu &&
+                  options_.precision == Precision::kFloat32,
+              "FP32 linear requires the CPU backend");
   INFER_CHECK(archive_.record(weight_name).dtype == DType::kFloat32,
               "FP32 data path requires float32 weights");
-  const float* bias = optional_float_weight(bias_name);
-  if (options_.backend == Device::kCpu) {
-    cpu::linear_fp32(float_weight(weight_name), bias, input, output,
-                     out_features, in_features);
-    return;
-  }
-  if (prefer_cublas || options_.linear_kernel == LinearKernel::kCublas) {
-    cuda::gemv_fp32_cublas(
-        cuda_context_->cublas(), float_weight(weight_name), bias, input,
-        output, out_features, in_features, cuda_context_->stream());
-  } else {
-    cuda::gemv_fp32(float_weight(weight_name), bias, input, output,
-                    out_features, in_features, cuda_context_->stream());
-  }
+  cpu::linear_fp32(float_weight(weight_name),
+                   optional_float_weight(bias_name), input, output,
+                   out_features, in_features);
 }
-
 
 void Qwen2Model::linear_cuda_bf16_batch(
     std::string_view weight_name, std::string_view bias_name,
@@ -343,27 +343,7 @@ void Qwen2Model::linear_cpu_fp32_batch(
                          token_count, out_features, in_features);
 }
 
-void Qwen2Model::linear_cuda_batch(
-    std::string_view weight_name, std::string_view bias_name,
-    const float* input, float* output, int token_count, int out_features,
-    int in_features) {
-  INFER_CHECK(options_.backend == Device::kCuda &&
-                  archive_.record(weight_name).dtype == DType::kFloat32,
-              "batched CUDA FP32 linear requires float32 weights");
-  if (options_.linear_kernel == LinearKernel::kCublas) {
-    cuda::gemm_fp32_cublas(
-        cuda_context_->cublas(), float_weight(weight_name), input, output,
-        token_count, out_features, in_features, cuda_context_->stream());
-  } else {
-    cuda::gemm_fp32(float_weight(weight_name), input, output, token_count,
-                    out_features, in_features, cuda_context_->stream());
-  }
-  const float* bias = optional_float_weight(bias_name);
-  if (bias) {
-    cuda::add_bias_batch(output, bias, token_count, out_features,
-                         cuda_context_->stream());
-  }
-}
+
 
 float* Qwen2Model::layer_key_cache(int layer) {
   const size_t per_layer = static_cast<size_t>(config_.num_kv_heads) *
@@ -612,93 +592,7 @@ int Qwen2Model::prefill_cuda_bf16(
   return result;
 }
 
-int Qwen2Model::prefill_cuda(const std::vector<int>& prompt_tokens) {
-  if (options_.precision == Precision::kW16A16 ||
-      options_.precision == Precision::kW8A16) {
-    return prefill_cuda_bf16(prompt_tokens);
-  }
-  INFER_CHECK(options_.backend == Device::kCuda,
-              "CUDA matrixized prefill requires CUDA backend");
-  INFER_CHECK(prefill_workspace_.data() != nullptr &&
-                  prefill_tokens_.data() != nullptr,
-              "CUDA matrixized prefill workspace was not allocated");
-  const int token_count = static_cast<int>(prompt_tokens.size());
-  const int hidden = config_.hidden_size;
-  const int kv_dim = config_.kv_dim();
-  const int head_dim = config_.head_dim();
-  const int intermediate = config_.intermediate_size;
-  auto stream = cuda_context_->stream();
 
-  INFER_CUDA_CHECK(cudaMemcpyAsync(
-      prefill_tokens_.data(), prompt_tokens.data(),
-      static_cast<size_t>(token_count) * sizeof(int), cudaMemcpyHostToDevice,
-      stream));
-  cuda::embedding_batch(
-      float_weight("model.embed_tokens.weight"),
-      static_cast<const int*>(prefill_tokens_.data()), prefill_x_, token_count,
-      hidden, stream);
-  for (int layer = 0; layer < config_.num_layers; ++layer) {
-    const auto prefix = layer_prefix(layer);
-    cuda::rms_norm_batch(
-        prefill_x_, float_weight(prefix + "input_layernorm.weight"),
-        prefill_norm_, token_count, hidden, config_.rms_norm_eps, stream);
-    linear_cuda_batch(
-        prefix + "self_attn.q_proj.weight", prefix + "self_attn.q_proj.bias",
-        prefill_norm_, prefill_q_, token_count, hidden, hidden);
-    linear_cuda_batch(
-        prefix + "self_attn.k_proj.weight", prefix + "self_attn.k_proj.bias",
-        prefill_norm_, prefill_k_, token_count, kv_dim, hidden);
-    linear_cuda_batch(
-        prefix + "self_attn.v_proj.weight", prefix + "self_attn.v_proj.bias",
-        prefill_norm_, prefill_v_, token_count, kv_dim, hidden);
-    cuda::rope_batch(
-        prefill_q_, prefill_k_, token_count, config_.num_heads,
-        config_.num_kv_heads, head_dim, 0, config_.rope_theta, stream);
-    float* key_cache = layer_key_cache(layer);
-    float* value_cache = layer_value_cache(layer);
-    cuda::store_kv_batch(
-        prefill_k_, prefill_v_, key_cache, value_cache, token_count,
-        config_.num_kv_heads, head_dim, options_.max_sequence_length, stream);
-    cuda::attention_prefill(
-        prefill_q_, key_cache, value_cache, prefill_attention_, token_count,
-        config_.num_heads, config_.num_kv_heads, head_dim,
-        options_.max_sequence_length, stream);
-    linear_cuda_batch(prefix + "self_attn.o_proj.weight", {},
-                      prefill_attention_, prefill_hidden_tmp_, token_count,
-                      hidden, hidden);
-    cuda::add_inplace(prefill_x_, prefill_hidden_tmp_, token_count * hidden,
-                      stream);
-    cuda::rms_norm_batch(
-        prefill_x_, float_weight(prefix + "post_attention_layernorm.weight"),
-        prefill_norm_, token_count, hidden, config_.rms_norm_eps, stream);
-    linear_cuda_batch(prefix + "mlp.gate_proj.weight", {}, prefill_norm_,
-                      prefill_gate_, token_count, intermediate, hidden);
-    linear_cuda_batch(prefix + "mlp.up_proj.weight", {}, prefill_norm_,
-                      prefill_up_, token_count, intermediate, hidden);
-    cuda::silu_mul(prefill_gate_, prefill_up_, prefill_mlp_,
-                   token_count * intermediate, stream);
-    linear_cuda_batch(prefix + "mlp.down_proj.weight", {}, prefill_mlp_,
-                      prefill_hidden_tmp_, token_count, hidden, intermediate);
-    cuda::add_inplace(prefill_x_, prefill_hidden_tmp_, token_count * hidden,
-                      stream);
-  }
-
-  const float* last_hidden =
-      prefill_x_ + static_cast<size_t>(token_count - 1) * hidden;
-  cuda::rms_norm(last_hidden, float_weight("model.norm.weight"), norm_, hidden,
-                 config_.rms_norm_eps, stream);
-  const std::string lm_head = archive_.contains("lm_head.weight")
-                                  ? "lm_head.weight"
-                                  : "model.embed_tokens.weight";
-  linear(lm_head, {}, norm_, logits_, config_.vocab_size, hidden, true);
-  cuda::argmax(logits_, config_.vocab_size,
-               static_cast<int*>(argmax_buffer_.data()), stream);
-  int result = 0;
-  INFER_CUDA_CHECK(cudaMemcpyAsync(&result, argmax_buffer_.data(), sizeof(int),
-                                   cudaMemcpyDeviceToHost, stream));
-  cuda_context_->synchronize();
-  return result;
-}
 
 int Qwen2Model::decode_token_cuda_bf16(int token, int position) {
   INFER_CHECK(options_.backend == Device::kCuda &&
@@ -779,90 +673,33 @@ int Qwen2Model::decode_token_cuda_bf16(int token, int position) {
   return result;
 }
 
-int Qwen2Model::decode_token_cuda(int token, int position) {
-  if (options_.precision == Precision::kW16A16 ||
-      options_.precision == Precision::kW8A16) {
-    return decode_token_cuda_bf16(token, position);
-  }
-  const int hidden = config_.hidden_size;
-  const int kv_dim = config_.kv_dim();
-  const int head_dim = config_.head_dim();
-  auto stream = cuda_context_->stream();
-  cuda::embedding(float_weight("model.embed_tokens.weight"), token, x_, hidden, stream);
-  for (int layer = 0; layer < config_.num_layers; ++layer) {
-    const auto prefix = layer_prefix(layer);
-    cuda::rms_norm(x_, float_weight(prefix + "input_layernorm.weight"), norm_, hidden,
-                   config_.rms_norm_eps, stream);
-    linear(prefix + "self_attn.q_proj.weight", prefix + "self_attn.q_proj.bias",
-           norm_, q_, hidden, hidden);
-    linear(prefix + "self_attn.k_proj.weight", prefix + "self_attn.k_proj.bias",
-           norm_, k_, kv_dim, hidden);
-    linear(prefix + "self_attn.v_proj.weight", prefix + "self_attn.v_proj.bias",
-           norm_, v_, kv_dim, hidden);
-    cuda::rope(q_, k_, config_.num_heads, config_.num_kv_heads, head_dim,
-               position, config_.rope_theta, stream);
-    float* key_cache = layer_key_cache(layer);
-    float* value_cache = layer_value_cache(layer);
-    cuda::store_kv(k_, v_, key_cache, value_cache, config_.num_kv_heads,
-                   head_dim, position, options_.max_sequence_length, stream);
-    cuda::attention_decode(q_, key_cache, value_cache, attention_, config_.num_heads,
-                           config_.num_kv_heads, head_dim, position + 1,
-                           options_.max_sequence_length, stream);
-    linear(prefix + "self_attn.o_proj.weight", {}, attention_, hidden_tmp_, hidden, hidden);
-    cuda::add_inplace(x_, hidden_tmp_, hidden, stream);
-    cuda::rms_norm(x_, float_weight(prefix + "post_attention_layernorm.weight"), norm_,
-                   hidden, config_.rms_norm_eps, stream);
-    linear(prefix + "mlp.gate_proj.weight", {}, norm_, gate_,
-           config_.intermediate_size, hidden);
-    linear(prefix + "mlp.up_proj.weight", {}, norm_, up_,
-           config_.intermediate_size, hidden);
-    cuda::silu_mul(gate_, up_, mlp_, config_.intermediate_size, stream);
-    linear(prefix + "mlp.down_proj.weight", {}, mlp_, hidden_tmp_,
-           hidden, config_.intermediate_size);
-    cuda::add_inplace(x_, hidden_tmp_, hidden, stream);
-  }
-  cuda::rms_norm(x_, float_weight("model.norm.weight"), norm_, hidden,
-                 config_.rms_norm_eps, stream);
-  const std::string lm_head = archive_.contains("lm_head.weight")
-                                  ? "lm_head.weight" : "model.embed_tokens.weight";
-  linear(lm_head, {}, norm_, logits_, config_.vocab_size, hidden, true);
-  cuda::argmax(logits_, config_.vocab_size, static_cast<int*>(argmax_buffer_.data()), stream);
-  int result = 0;
-  INFER_CUDA_CHECK(cudaMemcpyAsync(&result, argmax_buffer_.data(), sizeof(int),
-                                   cudaMemcpyDeviceToHost, stream));
-  cuda_context_->synchronize();
-  return result;
-}
+
 
 int Qwen2Model::decode_token(int token, int position) {
-  INFER_CHECK(token >= 0 && token < config_.vocab_size, "input token out of range");
+  INFER_CHECK(token >= 0 && token < config_.vocab_size,
+              "input token out of range");
   INFER_CHECK(position >= 0 && position < options_.max_sequence_length,
               "KV cache capacity exceeded");
   ProfileRange range("qwen2.decode_token");
-  return options_.backend == Device::kCpu ? decode_token_cpu(token, position)
-                                          : decode_token_cuda(token, position);
+  return options_.backend == Device::kCpu
+             ? decode_token_cpu(token, position)
+             : decode_token_cuda_bf16(token, position);
 }
 
 std::vector<float> Qwen2Model::last_logits_host() const {
   std::vector<float> result(static_cast<size_t>(config_.vocab_size));
   if (options_.backend == Device::kCpu) {
     std::copy(logits_, logits_ + config_.vocab_size, result.begin());
-  } else if (options_.precision == Precision::kW16A16 ||
-             options_.precision == Precision::kW8A16) {
-    std::vector<uint16_t> bits(result.size());
-    INFER_CUDA_CHECK(cudaMemcpyAsync(
-        bits.data(), bf16_logits_, bits.size() * sizeof(uint16_t),
-        cudaMemcpyDeviceToHost, cuda_context_->stream()));
-    cuda_context_->synchronize();
-    for (size_t index = 0; index < bits.size(); ++index) {
-      const uint32_t fp32_bits = static_cast<uint32_t>(bits[index]) << 16u;
-      std::memcpy(&result[index], &fp32_bits, sizeof(float));
-    }
-  } else {
-    INFER_CUDA_CHECK(cudaMemcpyAsync(
-        result.data(), logits_, result.size() * sizeof(float),
-        cudaMemcpyDeviceToHost, cuda_context_->stream()));
-    cuda_context_->synchronize();
+    return result;
+  }
+  std::vector<uint16_t> bits(result.size());
+  INFER_CUDA_CHECK(cudaMemcpyAsync(
+      bits.data(), bf16_logits_, bits.size() * sizeof(uint16_t),
+      cudaMemcpyDeviceToHost, cuda_context_->stream()));
+  cuda_context_->synchronize();
+  for (size_t index = 0; index < bits.size(); ++index) {
+    const uint32_t fp32_bits = static_cast<uint32_t>(bits[index]) << 16u;
+    std::memcpy(&result[index], &fp32_bits, sizeof(float));
   }
   return result;
 }
@@ -890,7 +727,7 @@ int Qwen2Model::prefill(const std::vector<int>& prompt_tokens) {
   ProfileRange implementation("qwen2.prefill.matrixized");
   const int next = options_.backend == Device::kCpu
                        ? prefill_cpu_fp32(prompt_tokens)
-                       : prefill_cuda(prompt_tokens);
+                       : prefill_cuda_bf16(prompt_tokens);
   position_ = static_cast<int>(prompt_tokens.size());
   has_prefilled_ = true;
   return next;

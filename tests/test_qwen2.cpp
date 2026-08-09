@@ -335,7 +335,7 @@ infer::RuntimeOptions cuda_bf16_options(
 }
 infer::RuntimeOptions cuda_w8a16_options(
     int max_sequence_length = 32,
-    infer::LinearKernel kernel = infer::LinearKernel::kCublas) {
+    infer::LinearKernel kernel = infer::LinearKernel::kCustom) {
   auto options = cuda_bf16_options(max_sequence_length, kernel);
   options.precision = infer::Precision::kW8A16;
   return options;
@@ -379,6 +379,31 @@ std::vector<int> prompt_tokens(size_t length) {
 }
 
 }  // namespace
+
+TEST(Qwen2RuntimeOptions, RejectsCudaFp32) {
+  TinyQwen2Model tiny;
+  auto options = cpu_options();
+  options.backend = infer::Device::kCuda;
+  EXPECT_THROW(infer::Qwen2Model model(tiny.path(), options), infer::Error);
+}
+
+TEST(Qwen2RuntimeOptions, RejectsCpuBf16AndKernelSelection) {
+  TinyQwen2Model tiny;
+  auto bf16 = cuda_bf16_options();
+  bf16.backend = infer::Device::kCpu;
+  EXPECT_THROW(infer::Qwen2Model model(tiny.path(), bf16), infer::Error);
+
+  auto fp32_cublas = cpu_options();
+  fp32_cublas.linear_kernel = infer::LinearKernel::kCublas;
+  EXPECT_THROW(infer::Qwen2Model model(tiny.path(), fp32_cublas), infer::Error);
+}
+
+TEST(Qwen2RuntimeOptions, RejectsW8A16Cublas) {
+  TinyQwen2Model tiny;
+  const auto options =
+      cuda_w8a16_options(32, infer::LinearKernel::kCublas);
+  EXPECT_THROW(infer::Qwen2Model model(tiny.path(), options), infer::Error);
+}
 
 TEST(Qwen2State, RejectsInvalidTransitionsAndCapacity) {
   TinyQwen2Model tiny;
@@ -460,78 +485,6 @@ TEST(Qwen2MatrixizedPrefill, CpuDecodeStateIsDeterministicFor16Tokens) {
   }
   EXPECT_EQ(first.position(), 24);
   EXPECT_EQ(second.position(), 24);
-}
-
-TEST(Qwen2MatrixizedPrefill, CudaFp32MatchesCpuAcrossRequiredLengths) {
-  int devices = 0;
-  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) GTEST_SKIP();
-  TinyQwen2Model tiny;
-  constexpr std::array<int, 7> kLengths{1, 2, 31, 32, 127, 128, 512};
-  for (const int length : kLengths) {
-    SCOPED_TRACE("prompt_length=" + std::to_string(length));
-    auto cuda_options = cpu_options(512);
-    cuda_options.backend = infer::Device::kCuda;
-    infer::Qwen2Model cpu(tiny.path(), cpu_options(512));
-    infer::Qwen2Model cuda(tiny.path(), cuda_options);
-    const auto prompt = prompt_tokens(static_cast<size_t>(length));
-
-    const int cpu_next = cpu.prefill(prompt);
-    const int cuda_next = cuda.prefill(prompt);
-    EXPECT_EQ(cuda_next, cpu_next);
-    EXPECT_GE(logits_cosine(cpu, cuda), 0.999999);
-    EXPECT_EQ(cpu.position(), length);
-    EXPECT_EQ(cuda.position(), length);
-    EXPECT_GT(cuda.prefill_workspace_bytes(), 0u);
-  }
-}
-
-TEST(Qwen2MatrixizedPrefill, CudaFp32DecodeStateMatchesCpuFor16Tokens) {
-  int devices = 0;
-  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) GTEST_SKIP();
-  TinyQwen2Model tiny;
-  auto cuda_options = cpu_options(32);
-  cuda_options.backend = infer::Device::kCuda;
-  infer::Qwen2Model cpu(tiny.path(), cpu_options(32));
-  infer::Qwen2Model cuda(tiny.path(), cuda_options);
-  const auto prompt = prompt_tokens(8);
-
-  int token = cpu.prefill(prompt);
-  ASSERT_EQ(cuda.prefill(prompt), token);
-  EXPECT_GE(logits_cosine(cpu, cuda), 0.999999);
-  for (int step = 0; step < 16; ++step) {
-    SCOPED_TRACE("decode_step=" + std::to_string(step));
-    const int cpu_next = cpu.decode_next(token);
-    const int cuda_next = cuda.decode_next(token);
-    ASSERT_EQ(cuda_next, cpu_next);
-    EXPECT_GE(logits_cosine(cpu, cuda), 0.999999);
-    token = cpu_next;
-  }
-  EXPECT_EQ(cpu.position(), 24);
-  EXPECT_EQ(cuda.position(), 24);
-}
-
-TEST(Qwen2MatrixizedPrefill, CudaCublasMatchesCustomKernel) {
-  int devices = 0;
-  if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) GTEST_SKIP();
-  TinyQwen2Model tiny;
-  auto custom_options = cpu_options(64);
-  custom_options.backend = infer::Device::kCuda;
-  auto cublas_options = custom_options;
-  cublas_options.linear_kernel = infer::LinearKernel::kCublas;
-  infer::Qwen2Model custom(tiny.path(), custom_options);
-  infer::Qwen2Model cublas(tiny.path(), cublas_options);
-  const auto prompt = prompt_tokens(32);
-
-  int token = custom.prefill(prompt);
-  ASSERT_EQ(cublas.prefill(prompt), token);
-  EXPECT_GE(logits_cosine(custom, cublas), 0.999999);
-  for (int step = 0; step < 8; ++step) {
-    const int custom_next = custom.decode_next(token);
-    const int cublas_next = cublas.decode_next(token);
-    ASSERT_EQ(cublas_next, custom_next);
-    EXPECT_GE(logits_cosine(custom, cublas), 0.999999);
-    token = custom_next;
-  }
 }
 
 TEST(Qwen2BFloat16, PrefillMatchesFp32AcrossFixedPrompts) {

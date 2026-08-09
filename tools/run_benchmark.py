@@ -373,7 +373,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--binary", type=Path, default=Path("build/llm_infer"))
     parser.add_argument("--model", type=Path)
     parser.add_argument("--backend", choices=("cpu", "cuda"), default="cuda")
-    parser.add_argument("--precision", choices=tuple(ARCHIVE_NAMES), default="fp32")
+    parser.add_argument("--precision", choices=tuple(ARCHIVE_NAMES))
     parser.add_argument("--token-ids", default=",".join(map(str, CANONICAL_TOKEN_IDS)))
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--max-seq-len", type=int, default=256)
@@ -396,6 +396,16 @@ def main() -> None:
         return
     if args.model is None or args.output is None:
         raise RuntimeError("--model and --output are required")
+    if args.precision is None:
+        args.precision = "fp32" if args.backend == "cpu" else "w16a16"
+    if args.backend == "cpu" and args.precision != "fp32":
+        raise RuntimeError("CPU backend supports fp32 only")
+    if args.backend == "cpu" and args.linear_kernel is not None:
+        raise RuntimeError("--linear-kernel is only valid for CUDA w16a16")
+    if args.backend == "cuda" and args.precision == "fp32":
+        raise RuntimeError("CUDA fp32 was removed; use w16a16 or w8a16")
+    if args.precision == "w8a16" and args.linear_kernel == "cublas":
+        raise RuntimeError("CUDA w8a16 supports the custom kernel only")
     if args.telemetry_interval_ms <= 0:
         raise RuntimeError("--telemetry-interval-ms must be positive")
     root = args.project_root.resolve()
