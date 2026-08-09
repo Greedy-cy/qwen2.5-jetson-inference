@@ -76,9 +76,8 @@ infer::RuntimeOptions runtime_options(const Arguments& args) {
   const std::string linear_kernel = args.get("--linear-kernel");
   if (!linear_kernel.empty()) {
     options.linear_kernel = parse_linear_kernel(linear_kernel);
-  } else if (options.precision == Precision::kW16A16 ||
-             options.precision == Precision::kW8A16) {
-    options.linear_kernel = LinearKernel::kCublas;
+  } else if (options.precision == Precision::kW16A16) {
+    options.linear_kernel = LinearKernel::kCustom;
   }
   return options;
 }
