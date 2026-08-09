@@ -1,0 +1,68 @@
+{
+  "report_id": "QWEN2.5-JETSON-FINAL-PERFORMANCE",
+  "measurement_commit": "fddc85f86d586e646746e3949516fb582c4966c0",
+  "runtime_cleanup_commit": "d44a0af23e26075b1d716d3eeecf10966f72ad75",
+  "git_dirty": false,
+  "device": "Jetson Orin Nano Super 8GB",
+  "cuda": "12.6",
+  "power_mode": "MAXN_SUPER",
+  "model": "Qwen2.5-0.5B-Instruct",
+  "model_sha256": {
+    "fp32": "a58918c8fcbe0332c3a09d233f14425d1ecf32facca658b92203ff89d81c0b63",
+    "w16a16_bf16": "f8b6b16a3a85d70083bfd7f822a7d587332982b0f0e27691512efa844855b2a6",
+    "w8a16": "730d0ca9a60b55a63534c8edce19353d8f55fda07e6e5fc04ec88470bcf57814"
+  },
+  "protocol": {
+    "canonical": "32 prompt + 128 output, max_seq_len=256, warmup=5, repeat=20",
+    "prefill_sweep": "1/32/128/512 prompt + 1 output, max_seq_len=640, warmup=5, repeat=20",
+    "decode_context_sweep": "32/128/512 prompt + 128 output, max_seq_len=640, warmup=5, repeat=20",
+    "linear_microbenchmark": "warmup=20, repeat=100",
+    "telemetry_interval_ms": 100
+  },
+  "canonical": {
+    "cpu_fp32": {"ttft_ms": 353.36, "prefill_tok_s": 90.56, "decode_tok_s": 13.51, "tpot_ms": 74.00, "total_ms": 9751.09, "decode_cv_pct": 0.162},
+    "cuda_bf16_cublas": {"ttft_ms": 16.79, "prefill_tok_s": 1906.25, "decode_tok_s": 67.70, "tpot_ms": 14.77, "total_ms": 1892.62, "decode_cv_pct": 0.025},
+    "cuda_bf16_custom": {"ttft_ms": 19.43, "prefill_tok_s": 1647.29, "decode_tok_s": 68.19, "tpot_ms": 14.66, "total_ms": 1881.82, "decode_cv_pct": 0.034},
+    "cuda_w8a16_custom": {"ttft_ms": 26.81, "prefill_tok_s": 1193.53, "decode_tok_s": 80.25, "tpot_ms": 12.46, "total_ms": 1609.43, "decode_cv_pct": 0.041}
+  },
+  "prefill_tok_s": {
+    "prompt_lengths": [1, 32, 128, 512],
+    "cpu_fp32": [7.96, 90.32, 113.86, 77.08],
+    "cuda_bf16_cublas": [69.78, 1904.72, 2778.62, 1123.96],
+    "cuda_bf16_custom": [14.24, 1652.13, 2226.00, 1047.50],
+    "cuda_w8a16_custom": [33.67, 1194.15, 1884.44, 984.68]
+  },
+  "decode_tok_s": {
+    "context_lengths": [32, 128, 512],
+    "cpu_fp32": [13.55, 13.04, 11.51],
+    "cuda_bf16_cublas": [67.66, 65.71, 59.08],
+    "cuda_bf16_custom": [68.10, 66.19, 59.43],
+    "cuda_w8a16_custom": [80.29, 77.53, 68.58]
+  },
+  "memory_mib": {
+    "cpu_fp32": {"archive": 1885.59, "device_weights": 0.0, "workspace": 19.53, "kv_cache": 6.0, "peak_rss": 2071.80},
+    "cuda_bf16_cublas": {"archive": 943.29, "device_weights": 942.29, "workspace": 9.91, "kv_cache": 3.0, "peak_rss": 2353.86},
+    "cuda_bf16_custom": {"archive": 943.29, "device_weights": 942.29, "workspace": 9.91, "kv_cache": 3.0, "peak_rss": 2163.20},
+    "cuda_w8a16_custom": {"archive": 612.71, "device_weights": 611.71, "workspace": 9.91, "kv_cache": 3.0, "peak_rss": 1496.17}
+  },
+  "energy": {
+    "cpu_fp32": {"mean_power_w": 13.234, "max_power_w": 13.343, "joules_per_generated_token": 1.0077},
+    "cuda_bf16_cublas": {"mean_power_w": 17.828, "max_power_w": 18.026, "joules_per_generated_token": 0.2629},
+    "cuda_bf16_custom": {"mean_power_w": 18.273, "max_power_w": 18.387, "joules_per_generated_token": 0.2679},
+    "cuda_w8a16_custom": {"mean_power_w": 17.298, "max_power_w": 17.411, "joules_per_generated_token": 0.2167}
+  },
+  "correctness": {
+    "bf16_fixed_prompt_top1": "5/5",
+    "bf16_canonical_greedy": "16/16",
+    "w8a16_fixed_prompt_top1": "5/5",
+    "w8a16_canonical_greedy": "14/16",
+    "w8a16_max_relative_output_error": 0.006993,
+    "w8a16_full_bf16_dequantized_weight_copy": false
+  },
+  "headline": {
+    "bf16_custom_decode_vs_cublas": 1.0072,
+    "w8a16_decode_vs_bf16_custom": 1.1768,
+    "w8a16_device_weights_reduction_pct": 35.08,
+    "w8a16_energy_per_token_reduction_pct": 19.09
+  }
+}
