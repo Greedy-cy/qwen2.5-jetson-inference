@@ -271,6 +271,24 @@ nlohmann::json run_case(const LinearCase& linear_case,
     device_scales.resize(archive.record(record.quant->scale_tensor).nbytes,
                          infer::Device::kCuda);
   }
+  infer::Buffer device_weight_bf16;
+  std::vector<uint16_t> dequantized_bf16_weight;
+  if (quantized) {
+    dequantized_bf16_weight.resize(
+        static_cast<size_t>(out_features) * in_features);
+    for (size_t index = 0; index < dequantized_bf16_weight.size(); ++index) {
+      const int row = static_cast<int>(index / in_features);
+      const int column = static_cast<int>(index % in_features);
+      const float scale =
+          bf16_to_float(host_scales[static_cast<size_t>(row) * groups +
+                                    column / group_size]);
+      dequantized_bf16_weight[index] = float_to_bf16(
+          static_cast<float>(host_int8_weight[index]) * scale);
+    }
+    device_weight_bf16.resize(dequantized_bf16_weight.size() *
+                                  sizeof(uint16_t),
+                              infer::Device::kCuda);
+  }
   infer::Buffer device_bias;
   if (bias_record) device_bias.resize(bias_record->nbytes, infer::Device::kCuda);
   const auto input = make_input(args.tokens, in_features);
@@ -296,6 +314,10 @@ nlohmann::json run_case(const LinearCase& linear_case,
     INFER_CUDA_CHECK(cudaMemcpyAsync(
         device_scales.data(), host_scales, device_scales.bytes(),
         cudaMemcpyHostToDevice, context.stream()));
+    INFER_CUDA_CHECK(cudaMemcpyAsync(
+        device_weight_bf16.data(), dequantized_bf16_weight.data(),
+        dequantized_bf16_weight.size() * sizeof(uint16_t),
+        cudaMemcpyHostToDevice, context.stream()));
   }
   if (bias_record) {
     INFER_CUDA_CHECK(cudaMemcpyAsync(device_bias.data(), host_bias,
@@ -308,8 +330,11 @@ nlohmann::json run_case(const LinearCase& linear_case,
                                     cudaMemcpyHostToDevice, context.stream()));
   context.synchronize();
 
-  const auto* weight_bf16 =
-      static_cast<const __nv_bfloat16*>(device_weight.data());
+  const auto* weight_bf16 = quantized
+                                ? static_cast<const __nv_bfloat16*>(
+                                      device_weight_bf16.data())
+                                : static_cast<const __nv_bfloat16*>(
+                                      device_weight.data());
   const auto* weight_int8 =
       static_cast<const int8_t*>(device_weight.data());
   const auto* scales_bf16 =

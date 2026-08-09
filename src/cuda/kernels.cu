@@ -1404,17 +1404,20 @@ template <int BlockN, int BlockK, int SharedK>
 __device__ __forceinline__ void dequant_w8a16_stage(
     const int8_t* weight_raw_tile, const BFloat16* scales,
     BFloat16* weight_tile, int block_row, int begin, int in_features) {
-  constexpr int kElements = BlockN * BlockK;
-  for (int index = threadIdx.x; index < kElements; index += blockDim.x) {
-    const int local_row = index / BlockK;
-    const int local_column = index % BlockK;
+  constexpr int kPairsPerRow = BlockK / 2;
+  constexpr int kPairs = BlockN * kPairsPerRow;
+  for (int pair = threadIdx.x; pair < kPairs; pair += blockDim.x) {
+    const int local_row = pair / kPairsPerRow;
+    const int local_column = (pair % kPairsPerRow) * 2;
     const float scale = __bfloat162float(
         scales[static_cast<size_t>(block_row + local_row) *
                    (in_features / 64) +
                (begin + local_column) / 64]);
-    weight_tile[local_row * SharedK + local_column] =
-        __float2bfloat16_rn(static_cast<float>(weight_raw_tile[index]) *
-                            scale);
+    const auto* raw = weight_raw_tile + local_row * BlockK + local_column;
+    *reinterpret_cast<BFloat16Pair*>(weight_tile + local_row * SharedK +
+                                     local_column) =
+        __floats2bfloat162_rn(static_cast<float>(raw[0]) * scale,
+                              static_cast<float>(raw[1]) * scale);
   }
 }
 
