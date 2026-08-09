@@ -1338,14 +1338,24 @@ __global__ void gemv_w8a16_fast_kernel(
         scales + static_cast<size_t>(row) * (in_features / 64);
     for (int chunk = lane + (warp % WarpsPerRow) * 32; chunk < chunks;
          chunk += 32 * WarpsPerRow) {
+      // Four adjacent 16-value chunks share one group-size-64 scale. Load it
+      // once per four-lane subgroup and broadcast it instead of issuing four
+      // identical global loads. The chunk base is always a multiple of 32,
+      // so lane & ~3 owns the current chunk's quant group.
+      float scale = 0.0f;
+      if ((lane & 3) == 0) {
+        scale = __bfloat162float(row_scales[chunk / 4]);
+      }
+      const unsigned int active_lanes = __activemask();
+      scale = __shfl_sync(active_lanes, scale, lane & ~3);
       sum += dot_w8a16_sixteen(
           row_weight + chunk * 16, input_shared + chunk * 16,
-          __bfloat162float(row_scales[chunk / 4]));
+          scale);
     }
   }
   sum = warp_reduce_sum(sum);
-  if (lane == 0) partials[warp] = sum;
   if constexpr (WarpsPerRow > 1) {
+    if (lane == 0) partials[warp] = sum;
     __syncthreads();
     if (threadIdx.x < RowsPerBlock) {
       float total = 0.0f;
@@ -1361,9 +1371,11 @@ __global__ void gemv_w8a16_fast_kernel(
       }
     }
   } else {
-    if (row < out_features) {
+    // Lane 0 already owns the complete warp reduction. Avoid the previous
+    // shared-memory store/load round trip for the one-warp-per-row path.
+    if (lane == 0 && row < out_features) {
       const float bias_value = bias ? __bfloat162float(bias[row]) : 0.0f;
-      output[row] = __float2bfloat16_rn(partials[warp] + bias_value);
+      output[row] = __float2bfloat16_rn(sum + bias_value);
     }
   }
 }
