@@ -28,8 +28,8 @@ CUDA BF16 custom 和 CUDA W8A16 custom 四条最终路径的统一测试。
 | 锁频 | GPU 1020 MHz、EMC 3199 MHz，并固定 CPU；结束后恢复 |
 | 遥测 | tegrastats 100 ms |
 
-正式性能数据绑定提交 `fddc85f86d586e646746e3949516fb582c4966c0`，
-`git_dirty=false`。最终精简提交 `d44a0af23e26075b1d716d3eeecf10966f72ad75`
+正式性能数据绑定提交 `eb62f883b6230215a1f998c55ee5b954ad83a610`，
+`git_dirty=false`。最终精简提交 `650a9948b4be14feebc1c796df69413023a6b950`
 只删除公开范围外路径、收敛 CLI 并增加非法组合测试，没有改变 BF16/W8 kernel；该提交
 在独立 Release 目录通过 29/29 CTest 和 CLI smoke。
 

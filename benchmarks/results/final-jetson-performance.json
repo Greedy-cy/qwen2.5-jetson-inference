@@ -1,7 +1,7 @@
 {
   "report_id": "QWEN2.5-JETSON-FINAL-PERFORMANCE",
-  "measurement_commit": "fddc85f86d586e646746e3949516fb582c4966c0",
-  "runtime_cleanup_commit": "d44a0af23e26075b1d716d3eeecf10966f72ad75",
+  "measurement_commit": "eb62f883b6230215a1f998c55ee5b954ad83a610",
+  "runtime_cleanup_commit": "650a9948b4be14feebc1c796df69413023a6b950",
   "git_dirty": false,
   "device": "Jetson Orin Nano Super 8GB",
   "cuda": "12.6",

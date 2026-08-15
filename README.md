@@ -1,4 +1,4 @@
-# Qwen2.5 端侧推理框架与 CUDA 算子优化
+# Qwen2.5 Jetson 推理框架与 CUDA 算子优化
 
 面向 Jetson Orin Nano Super 的 C++17/CUDA Qwen2.5 batch=1 推理框架。项目以
 `Qwen2.5-0.5B-Instruct` 为固定模型，实现矩阵化 Prefill、KV Cache 和自回归 Decode，
@@ -39,7 +39,8 @@ W8A16 Prefill 仍慢于 BF16，因为 fused dequantize GEMM 尚未达到纯 BF16
 目标平台固定为 Linux aarch64、CUDA 12.6、SM87；项目不维护跨平台兼容层。
 
 ```bash
-cd /path/to/qwen2.5-jetson-inference
+git clone https://github.com/Greedy-cy/qwen2.5-jetson-inference.git
+cd qwen2.5-jetson-inference
 bash scripts/bootstrap.sh
 
 .venv/bin/python tools/download_model.py \
@@ -64,6 +65,13 @@ ctest --test-dir build --output-on-failure
 - `model.fp32.qbin`：CPU FP32 reference；
 - `model.w16a16.qbin`：CUDA BF16；
 - `model.w8a16.qbin`：group-size 64 INT8 Linear weights + BF16 scale/非量化权重。
+
+## 模型与权重
+
+本仓库不分发模型权重。`tools/download_model.py` 从
+[Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
+下载模型，`tools/export_model.py` 再生成运行时使用的 qbin 归档。模型权重及其使用
+遵循模型发布页面列出的许可条款；本仓库的 MIT License 只覆盖项目自身代码与文档。
 
 ## 单次推理
 
@@ -144,8 +152,6 @@ python3 tools/run_benchmark.py \
 - [CUDA 优化](docs/cuda-optimizations.md)：BF16 Tensor Core、shape-aware GEMV、融合
   LM Head、W8A16 在线反量化；
 - [最终性能报告](docs/performance.md)：统一 benchmark、内存/功耗与 Nsight；
-- [简历表述](docs/resume.md)：中英文可核验 bullets；
-- [面试讲解](docs/interview-guide.md)：核心设计选择、瓶颈与限制。
 
 ## 项目边界
 
@@ -153,3 +159,7 @@ python3 tools/run_benchmark.py \
 continuous batching、多 GPU 或通用跨平台后端。W8A16 对 5 个固定 prompt 的首 token
 top-1 为 5/5，但 canonical 16-token greedy 与 BF16 为 14/16 一致；该已知差异来自
 INT8 在线反量化到 BF16 后的舍入误差，详见最终性能报告。
+
+## License
+
+项目代码与文档采用 [MIT License](LICENSE)。Qwen2.5 模型权重不包含在本许可范围内。
